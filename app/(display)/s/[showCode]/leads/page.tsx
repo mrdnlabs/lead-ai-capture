@@ -89,12 +89,20 @@ export default async function LeadsPage({ params }: Params) {
           </div>
           <h1 className="text-xl font-semibold">Leads · {opps.length}</h1>
         </div>
-        <a
-          href={`/s/${showCode}/capture`}
-          className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white"
-        >
-          New capture
-        </a>
+        <div className="flex items-center gap-2">
+          <a
+            href={`/api/shows/${showCode}/export.csv`}
+            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium hover:bg-neutral-50"
+          >
+            Export CSV
+          </a>
+          <a
+            href={`/s/${showCode}/capture`}
+            className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white"
+          >
+            New capture
+          </a>
+        </div>
       </header>
 
       {opps.length === 0 ? (

@@ -18,6 +18,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
             <a className="underline-offset-2 hover:underline" href="/admin/configs">
               Configs
             </a>
+            <a className="underline-offset-2 hover:underline" href="/admin/shows">
+              Shows
+            </a>
             <a className="text-neutral-500 hover:text-neutral-900" href="/">
               ← Back to app
             </a>

@@ -25,7 +25,8 @@ async function main() {
   const tokenHash = data.properties?.hashed_token;
   if (!tokenHash) throw new Error('No hashed_token in admin response');
 
-  const callbackUrl = `http://localhost:3000/auth/callback?token_hash=${encodeURIComponent(
+  const origin = process.env.SIGNIN_ORIGIN ?? 'http://localhost:3000';
+  const callbackUrl = `${origin}/auth/callback?token_hash=${encodeURIComponent(
     tokenHash,
   )}&type=magiclink&next=${encodeURIComponent(next)}`;
 

@@ -2,7 +2,18 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { env } from '@/lib/env';
 
-const PUBLIC_PATHS = ['/auth/signin', '/auth/callback', '/_next', '/favicon.ico'];
+const PUBLIC_PATHS = [
+  '/auth/signin',
+  '/auth/callback',
+  '/_next',
+  '/favicon.ico',
+  '/manifest.webmanifest',
+  '/sw.js',
+  '/apple-touch-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/icon-maskable-512.png',
+];
 
 export async function updateSupabaseSession(request: NextRequest) {
   let response = NextResponse.next({ request });

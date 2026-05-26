@@ -47,6 +47,18 @@ export async function uploadBlob(args: {
   return { size: args.file.size };
 }
 
+export async function downloadBlob(args: { bucket: string; key: string }): Promise<{
+  buffer: Buffer;
+  mimeType: string;
+  size: number;
+}> {
+  const supabase = await createSupabaseServiceRoleClient();
+  const { data, error } = await supabase.storage.from(args.bucket).download(args.key);
+  if (error || !data) throw new Error(`Storage download failed (${args.bucket}/${args.key}): ${error?.message}`);
+  const buffer = Buffer.from(await data.arrayBuffer());
+  return { buffer, mimeType: data.type, size: buffer.byteLength };
+}
+
 export async function signedDownloadUrl(args: {
   bucket: string;
   key: string;

@@ -13,7 +13,10 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <div className="text-sm font-medium">Admin · AI Capture</div>
           <nav className="space-x-4 text-sm">
             <a className="underline-offset-2 hover:underline" href="/admin/providers">
-              Providers
+              Credentials
+            </a>
+            <a className="underline-offset-2 hover:underline" href="/admin/configs">
+              Configs
             </a>
             <a className="text-neutral-500 hover:text-neutral-900" href="/">
               ← Back to app

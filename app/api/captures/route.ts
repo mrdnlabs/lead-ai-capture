@@ -1,9 +1,10 @@
 import { and, eq } from 'drizzle-orm';
-import { NextResponse, type NextRequest } from 'next/server';
+import { after, NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { db } from '@/db/client';
 import { captures, mediaBlobs } from '@/db/schema';
 import { requireRep } from '@/lib/auth/currentRep';
+import { processCapture } from '@/lib/processing/processCapture';
 import {
   AUDIO_BUCKET,
   PHOTO_BUCKET,
@@ -143,6 +144,15 @@ export async function POST(request: NextRequest): Promise<Response> {
         mimeType: photo.type,
         sizeBytes: photo.size,
       });
+    }
+  });
+
+  // Non-blocking AI processing: runs after the response is sent.
+  after(async () => {
+    try {
+      await processCapture({ captureId });
+    } catch (e) {
+      console.error(`[processCapture] capture ${captureId} failed:`, (e as Error).message);
     }
   });
 

@@ -4,6 +4,16 @@ Append-only log of surprises and gotchas discovered during development. Newest a
 
 ---
 
+## 2026-05-26 — Supabase magic links use PKCE; must open in the same browser
+
+Supabase's `signInWithOtp` uses the PKCE flow by default. When the rep submits the sign-in form, a `code_verifier` cookie is set in **that** browser. The magic link in the email contains a `code` that must be exchanged AGAINST that verifier in `/auth/callback`. If the rep clicks the link in a different browser/profile/incognito window, the exchange fails with "PKCE code verifier not found in storage."
+
+Implication for the PWA: this is fine in practice — the rep requests the link on their phone and clicks it on the same phone. But the magic link CAN'T be tested by requesting on a laptop and clicking on the phone (or vice versa). Document this in the rep onboarding flow.
+
+## 2026-05-26 — Next.js 16 renames `middleware` → `proxy`
+
+Dev server logs the file as `proxy.ts` in timing output even though the file is still named `middleware.ts`. The old name still works (deprecation warning only), but at some point we should rename `middleware.ts` → `proxy.ts` to match the new convention.
+
 ## 2026-05-26 — Supabase Marketplace integration gotchas (multiple)
 
 When provisioning Supabase via the Vercel Marketplace:

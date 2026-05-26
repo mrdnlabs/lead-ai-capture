@@ -1,4 +1,4 @@
-import { customType, pgEnum, pgSchema, uuid } from 'drizzle-orm/pg-core';
+import { customType, pgEnum } from 'drizzle-orm/pg-core';
 
 export const bytea = customType<{ data: Buffer; driverData: Buffer; default: false }>({
   dataType() {
@@ -54,7 +54,8 @@ export const processingJobStatusEnum = pgEnum('processing_job_status', [
   'failed',
 ]);
 
-export const authSchema = pgSchema('auth');
-export const authUsers = authSchema.table('users', {
-  id: uuid('id').primaryKey(),
-});
+// Note: reps.id references auth.users(id) at the Postgres level via a manual
+// FK added in db/supabase/setup.sql (and synced via a trigger on auth.users
+// insert). We deliberately do NOT declare auth.users in Drizzle to avoid
+// drizzle-kit attempting to CREATE SCHEMA "auth" / CREATE TABLE auth.users
+// (both already managed by Supabase).

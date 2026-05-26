@@ -1,8 +1,9 @@
 import { pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
-import { authUsers, repRoleEnum } from './_types';
+import { repRoleEnum } from './_types';
 
+// id matches auth.users(id). FK + sync trigger applied in db/supabase/setup.sql.
 export const reps = pgTable('reps', {
-  id: uuid('id').primaryKey().references(() => authUsers.id, { onDelete: 'cascade' }),
+  id: uuid('id').primaryKey(),
   email: text('email').notNull().unique(),
   displayName: text('display_name'),
   role: repRoleEnum('role').notNull().default('rep'),

@@ -4,6 +4,23 @@ Append-only log of surprises and gotchas discovered during development. Newest a
 
 ---
 
+## 2026-05-26 — Supabase Marketplace integration gotchas (multiple)
+
+When provisioning Supabase via the Vercel Marketplace:
+
+1. **All Marketplace-provisioned env vars are marked "Sensitive"** by default. Sensitive vars cannot be read back via dashboard or `vercel env pull` — they're only readable by deployed code at runtime. For local dev you have to grab the values from Supabase dashboard directly.
+2. **Env var names get prefixed with the resource name** (e.g. `aicapture_POSTGRES_URL` instead of `POSTGRES_URL`). Either rename the resource in Vercel to drop the prefix, or read the prefixed names in code (we use a `lib/env.ts` helper with fallback to standard names).
+3. **The auto-generated DB password contains special URL-reserved characters** (`/ & @ * :`). When you paste it into a connection string, you MUST URL-encode it — `new URL(connectionString)` splits at the first unencoded `@` and routes auth to the wrong place. Easiest fix: reset to an alphanumeric-only password (we did this via Supabase dashboard).
+4. **Vercel-stored env vars are NOT auto-updated when you reset the DB password.** Production stays broken until you also update the env vars manually (or remove + re-add the Marketplace integration).
+
+## 2026-05-26 — Drizzle + Supabase auth.users overlap
+
+Don't declare `auth.users` in Drizzle schema (via `pgSchema('auth')`). `drizzle-kit generate` will emit `CREATE SCHEMA "auth"` and `CREATE TABLE auth.users` statements, both of which collide with Supabase's existing managed objects. Instead: declare `reps.id` as a plain `uuid PRIMARY KEY` in Drizzle, and add the FK to `auth.users(id)` via a manual SQL setup script (we use `db/supabase/setup.sql`). Same script adds the `auth.users → reps` sync trigger.
+
+## 2026-05-26 — drizzle-kit push needs a TTY; use generate + migrate non-interactively
+
+`pnpm db:push` prompts for confirmation interactively and errors with `Interactive prompts require a TTY terminal` under our PowerShell wrapper. Workaround: use `pnpm db:generate` (writes SQL files non-interactively) followed by `pnpm db:migrate` (applies them non-interactively). This is also the production-correct pattern.
+
 ## 2026-05-26 — pnpm 11 build-script approval gate is per-package
 
 `pnpm install` requires explicit approval for native build scripts (sharp, esbuild, unrs-resolver). The `onlyBuiltDependencies` array in `pnpm-workspace.yaml` did NOT take effect for us; only `dangerouslyAllowAllBuilds: true` worked. Without approval, `pnpm <script>` fails with `[ERR_PNPM_IGNORED_BUILDS]` even for unrelated scripts because pnpm runs a dependency-status check first.

@@ -1,11 +1,9 @@
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { env } from '@/lib/env';
 import * as schema from './schema';
 
-const connectionString = process.env.POSTGRES_URL;
-if (!connectionString) throw new Error('POSTGRES_URL env var is required');
-
-const queryClient = postgres(connectionString, {
+const queryClient = postgres(env.postgresUrl, {
   prepare: false,
   max: 1,
 });

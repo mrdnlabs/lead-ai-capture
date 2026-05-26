@@ -4,6 +4,21 @@ Append-only log of surprises and gotchas discovered during development. Newest a
 
 ---
 
+## 2026-05-26 — Gemini Live ephemeral tokens don't auth browser-direct WSS (Phase 2 blocker)
+
+We implemented the full client + server flow for Gemini Live:
+- Server mints ephemeral tokens via `POST https://generativelanguage.googleapis.com/v1alpha/auth_tokens` (body shape: `{ uses, expireTime }` — no `liveConnectConstraints` for AI Studio keys; model/instructions go in the client's `setup` message)
+- Client receives `{ token, endpoint, setupMessage }` and opens WSS
+
+But the browser-direct WSS connection to `wss://...v1beta.GenerativeService.BidiGenerateContent` (and v1alpha equivalent) rejects every browser-usable auth mechanism:
+- `?access_token=auth_tokens/HASH` query param → close code 1008, "Method doesn't allow unregistered callers"
+- `Sec-WebSocket-Protocol` subprotocol with token (in any of 4 variants) → close code 1006 (abnormal, no reason)
+- Subprotocols can't contain `/` or space, so `Bearer auth_tokens/HASH` is invalid at the WebSocket constructor
+
+This appears to be a deliberate limitation: AI Studio's `auth_tokens` are meant for **server-side use only**. Direct browser→Gemini WSS auth requires either Vertex AI OAuth or proxying through a server.
+
+**Mitigation for v1**: keep Phase 3's "always-record audio → batch-process server-side" pattern (which works perfectly). Defer realtime UI until we either (a) move to Vertex AI for OAuth-based browser auth, or (b) stand up a server-side WSS proxy on a runtime with persistent connection support (Vercel Functions can't easily hold long WSS connections). All Phase 2 server-side code (token mint, provider adapter, client hook) stays in place — only the capture-page integration is skipped.
+
 ## 2026-05-26 — Supabase magic links use PKCE; must open in the same browser
 
 Supabase's `signInWithOtp` uses the PKCE flow by default. When the rep submits the sign-in form, a `code_verifier` cookie is set in **that** browser. The magic link in the email contains a `code` that must be exchanged AGAINST that verifier in `/auth/callback`. If the rep clicks the link in a different browser/profile/incognito window, the exchange fails with "PKCE code verifier not found in storage."

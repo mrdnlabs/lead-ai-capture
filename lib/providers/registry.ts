@@ -1,6 +1,6 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, or } from 'drizzle-orm';
 import { db } from '@/db/client';
-import { providerConfigs, type ProviderConfig } from '@/db/schema';
+import { providerAbAssignments, providerConfigs, type ProviderConfig } from '@/db/schema';
 
 export type ConfigKind = ProviderConfig['kind'];
 
@@ -30,3 +30,41 @@ export async function resolveProviderConfig(args: {
     .limit(1);
   return defaultConfig ?? null;
 }
+
+/**
+ * Find the "shadow" provider config for an A/B comparison, if any. Returns
+ * the other config in the A/B assignment for this (show, kind), or null.
+ * Used by the orchestrator to run a parallel extraction without overriding
+ * the merged lead fields.
+ */
+export async function resolveShadowProviderConfig(args: {
+  showId: string;
+  kind: ConfigKind;
+  primaryConfigId: string;
+}): Promise<ProviderConfig | null> {
+  const [assignment] = await db
+    .select()
+    .from(providerAbAssignments)
+    .where(
+      and(
+        eq(providerAbAssignments.showId, args.showId),
+        eq(providerAbAssignments.kind, args.kind),
+      ),
+    )
+    .limit(1);
+  if (!assignment) return null;
+  const otherId =
+    assignment.providerConfigAId === args.primaryConfigId
+      ? assignment.providerConfigBId
+      : assignment.providerConfigAId;
+  if (!otherId || otherId === args.primaryConfigId) return null;
+  const [other] = await db
+    .select()
+    .from(providerConfigs)
+    .where(eq(providerConfigs.id, otherId))
+    .limit(1);
+  return other ?? null;
+}
+
+// re-export to keep imports tidy
+export { or };

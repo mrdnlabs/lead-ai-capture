@@ -15,8 +15,12 @@ import {
   getVisionProvider,
 } from '@/lib/providers';
 import { loadCredential } from '@/lib/providers/credentials';
-import { resolveProviderConfig } from '@/lib/providers/registry';
+import {
+  resolveProviderConfig,
+  resolveShadowProviderConfig,
+} from '@/lib/providers/registry';
 import { AUDIO_BUCKET, PHOTO_BUCKET, downloadBlob } from '@/lib/storage/server';
+import type { ProviderConfig } from '@/db/schema';
 
 interface ProcessOptions {
   captureId: string;
@@ -278,9 +282,141 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
     });
   });
 
+  // 7.5 Shadow A/B runs (don't affect mergedFields; produce extra extraction rows)
+  if (capture.audioBlobKey && transcriptionConfig) {
+    const shadow = await resolveShadowProviderConfig({
+      showId: show.id,
+      kind: 'transcription',
+      primaryConfigId: transcriptionConfig.id,
+    });
+    if (shadow) await runShadowTranscription(shadow, capture.audioBlobKey, captureId);
+  }
+  if (capture.photoBlobKey && visionConfig) {
+    const shadow = await resolveShadowProviderConfig({
+      showId: show.id,
+      kind: 'vision',
+      primaryConfigId: visionConfig.id,
+    });
+    if (shadow) await runShadowVision(shadow, capture.photoBlobKey, leadSchema, captureId);
+  }
+  if (transcript && extractionConfig) {
+    const shadow = await resolveShadowProviderConfig({
+      showId: show.id,
+      kind: 'extraction',
+      primaryConfigId: extractionConfig.id,
+    });
+    if (shadow) await runShadowExtraction(shadow, transcript, leadSchema, captureId);
+  }
+
   // 8. Mark processed
   await db.update(captures).set({ status: 'processed' }).where(eq(captures.id, captureId));
 
   // 9. Ensure an opportunity is at least marked as "open" still (no-op for now)
   void opportunities;
+}
+
+async function runShadowTranscription(
+  config: ProviderConfig,
+  audioBlobKey: string,
+  captureId: string,
+): Promise<void> {
+  try {
+    const audio = await downloadBlob({ bucket: AUDIO_BUCKET, key: audioBlobKey });
+    const credential = await loadCredential(config.credentialId, {
+      purpose: 'transcription_shadow',
+      contextId: captureId,
+    });
+    const provider = getTranscriptionProvider(config);
+    const result = await provider.transcribe({
+      ctx: { config, credential, captureId },
+      audio: audio.buffer,
+      mimeType: audio.mimeType,
+    });
+    await db.insert(captureExtractions).values({
+      captureId,
+      transcriptionProviderConfigId: config.id,
+      transcript: result.transcript,
+      extractedFields: {},
+      badgeFields: {},
+      modelVersions: { transcription: result.modelVersion, mode: 'shadow' },
+      latencyMs: { transcription: result.latencyMs },
+      costEstimateUsd: result.costEstimateUsd?.toString() ?? null,
+    });
+  } catch (e) {
+    console.error('[processCapture] shadow transcription failed:', (e as Error).message);
+  }
+}
+
+async function runShadowVision(
+  config: ProviderConfig,
+  photoBlobKey: string,
+  leadSchema: ReturnType<typeof buildLeadSchema>,
+  captureId: string,
+): Promise<void> {
+  try {
+    const photo = await downloadBlob({ bucket: PHOTO_BUCKET, key: photoBlobKey });
+    const credential = await loadCredential(config.credentialId, {
+      purpose: 'vision_shadow',
+      contextId: captureId,
+    });
+    const provider = getVisionProvider(config);
+    const instructions =
+      config.defaultInstructions ||
+      "Extract visible fields from this trade-show name badge.";
+    const result = await provider.extractFromImage({
+      ctx: { config, credential, captureId },
+      image: photo.buffer,
+      mimeType: photo.mimeType,
+      schema: leadSchema,
+      instructions,
+    });
+    await db.insert(captureExtractions).values({
+      captureId,
+      transcriptionProviderConfigId: null,
+      transcript: null,
+      extractedFields: {},
+      badgeFields: result.fields as Record<string, unknown>,
+      modelVersions: { vision: result.modelVersion, mode: 'shadow' },
+      latencyMs: { vision: result.latencyMs },
+      costEstimateUsd: null,
+    });
+  } catch (e) {
+    console.error('[processCapture] shadow vision failed:', (e as Error).message);
+  }
+}
+
+async function runShadowExtraction(
+  config: ProviderConfig,
+  transcript: string,
+  leadSchema: ReturnType<typeof buildLeadSchema>,
+  captureId: string,
+): Promise<void> {
+  try {
+    const credential = await loadCredential(config.credentialId, {
+      purpose: 'extraction_shadow',
+      contextId: captureId,
+    });
+    const provider = getExtractionProvider(config);
+    const instructions =
+      config.defaultInstructions ||
+      'Extract lead information from this trade-show conversation transcript.';
+    const result = await provider.extractFromText({
+      ctx: { config, credential, captureId },
+      text: transcript,
+      schema: leadSchema,
+      instructions,
+    });
+    await db.insert(captureExtractions).values({
+      captureId,
+      transcriptionProviderConfigId: null,
+      transcript: null,
+      extractedFields: result.fields as Record<string, unknown>,
+      badgeFields: {},
+      modelVersions: { extraction: result.modelVersion, mode: 'shadow' },
+      latencyMs: { extraction: result.latencyMs },
+      costEstimateUsd: null,
+    });
+  } catch (e) {
+    console.error('[processCapture] shadow extraction failed:', (e as Error).message);
+  }
 }

@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import { desc } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { providerCredentials } from '@/db/schema';

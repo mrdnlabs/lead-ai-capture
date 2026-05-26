@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { enqueueCapture, uploadOne } from '@/lib/offline/queue';
 
-type State = 'ready' | 'recording' | 'uploading' | 'done' | 'error';
+type State = 'ready' | 'recording' | 'uploading' | 'done' | 'queued' | 'error';
 
 interface Props {
   showSlug: string;
@@ -111,26 +112,50 @@ export function CaptureRecorder({ showSlug, opportunityCode, leadsUrl }: Props) 
     }
     setState('uploading');
     setError(null);
-    const form = new FormData();
-    form.set('showSlug', showSlug);
-    form.set('opportunityCode', opportunityCode);
-    form.set('idempotencyKey', crypto.randomUUID());
-    form.set('clientCapturedAt', new Date().toISOString());
-    if (durationMs > 0) form.set('durationMs', String(durationMs));
-    if (audioBlob) {
-      const ext = audioBlob.type.includes('webm') ? 'webm' : audioBlob.type.includes('mp4') ? 'm4a' : 'audio';
-      form.set('audio', new File([audioBlob], `capture.${ext}`, { type: audioBlob.type }));
-    }
-    if (photoFile) form.set('photo', photoFile);
 
-    const res = await fetch('/api/captures', { method: 'POST', body: form });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-      setError(body.error ?? `HTTP ${res.status}`);
-      setState('error');
-      return;
+    const queuedInput = {
+      showSlug,
+      opportunityCode,
+      clientCapturedAt: new Date().toISOString(),
+      durationMs: durationMs > 0 ? durationMs : undefined,
+      photoBlob: photoFile ?? undefined,
+      audioBlob: audioBlob ?? undefined,
+    };
+
+    // If clearly offline, skip the doomed network call and enqueue immediately.
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      try {
+        await enqueueCapture(queuedInput);
+        setState('queued');
+        return;
+      } catch (e) {
+        setError(`Could not queue capture: ${(e as Error).message}`);
+        setState('error');
+        return;
+      }
     }
-    setState('done');
+
+    // Online: try direct upload via the same payload shape uploadOne uses.
+    const idempotencyKey = crypto.randomUUID();
+    try {
+      await uploadOne({
+        id: 'inline',
+        idempotencyKey,
+        queuedAt: Date.now(),
+        attempts: 0,
+        ...queuedInput,
+      });
+      setState('done');
+    } catch (e) {
+      // Network error or 5xx — fall back to the queue so the rep doesn't lose data.
+      try {
+        await enqueueCapture(queuedInput);
+        setState('queued');
+      } catch (qe) {
+        setError(`Upload failed: ${(e as Error).message}; queue also failed: ${(qe as Error).message}`);
+        setState('error');
+      }
+    }
   }
 
   function reset() {
@@ -140,11 +165,19 @@ export function CaptureRecorder({ showSlug, opportunityCode, leadsUrl }: Props) 
     setState('ready');
   }
 
-  if (state === 'done') {
+  if (state === 'done' || state === 'queued') {
     return (
       <div className="space-y-4">
-        <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800">
-          Capture uploaded.
+        <div
+          className={
+            state === 'queued'
+              ? 'rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800'
+              : 'rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800'
+          }
+        >
+          {state === 'queued'
+            ? 'Saved locally. Will upload when you’re back online.'
+            : 'Capture uploaded.'}
         </div>
         <div className="flex gap-2">
           <button

@@ -120,6 +120,10 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     if (!file) return;
     setPhotoFile(file);
     setPhotoPreviewUrl(URL.createObjectURL(file));
+    // If a live session is going, also feed the photo to Gemini so the AI can
+    // see it mid-conversation. No-op if not live; the photo is uploaded with
+    // the capture regardless.
+    void realtime.sendImage(file);
   }
 
   async function submit() {

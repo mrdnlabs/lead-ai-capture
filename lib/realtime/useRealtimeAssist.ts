@@ -95,6 +95,41 @@ export function useRealtimeAssist() {
     setStatus('closed');
   }, []);
 
+  /**
+   * Inject an image into the live conversation. Gemini Live treats single
+   * images as one-frame video input — same wrapper as audio, different key.
+   * The AI can then describe / extract from the image and weave it into the
+   * conversation ("I see Sarah Chen, VP Engineering at Acme on the badge…").
+   *
+   * No-op when the session isn't live, so it's safe to call unconditionally
+   * whenever a photo is selected.
+   */
+  const sendImage = useCallback(async (blob: Blob): Promise<boolean> => {
+    const ctx = ctxRef.current;
+    if (!ctx || ctx.ws.readyState !== WebSocket.OPEN) return false;
+    const buf = await blob.arrayBuffer();
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    const data = btoa(binary);
+    ctx.ws.send(
+      JSON.stringify({
+        realtimeInput: {
+          video: { data, mimeType: blob.type || 'image/jpeg' },
+        },
+      }),
+    );
+    // Hint to the model: "the rep just attached a photo — look at it"
+    ctx.ws.send(
+      JSON.stringify({
+        realtimeInput: {
+          text: 'The rep just attached a photo — likely the lead\'s name badge or a business card. Take a look and acknowledge or extract what you see.',
+        },
+      }),
+    );
+    return true;
+  }, []);
+
   useEffect(() => {
     return () => stop();
   }, [stop]);
@@ -214,7 +249,7 @@ export function useRealtimeAssist() {
     [status, stop],
   );
 
-  return { status, error, transcript, start, stop };
+  return { status, error, transcript, start, stop, sendImage };
 }
 
 function startMicStreaming(

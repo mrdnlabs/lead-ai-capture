@@ -143,12 +143,19 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
   const visionConfig = visionResolved?.config ?? null;
   const extractionConfig = extractionResolved?.config ?? null;
 
-  // 4. Transcribe (if audio + transcription provider)
+  // 4. Transcribe — prefer the live-conversation transcript captured during
+  // realtime assist (richer signal: both speakers, no re-transcription cost
+  // or latency). Fall back to batch transcription of the raw audio otherwise.
   let transcript = '';
   let transcriptLatencyMs: number | undefined;
   let transcriptCost: number | undefined;
   let transcriptionModelVersion: string | undefined;
-  if (capture.audioBlobKey && transcriptionResolved) {
+  if (Array.isArray(capture.realtimeTranscript) && capture.realtimeTranscript.length > 0) {
+    transcript = (capture.realtimeTranscript as Array<{ role: string; text: string }>)
+      .map((t) => `${t.role === 'assistant' ? 'AI' : 'Rep'}: ${t.text}`)
+      .join('\n');
+    transcriptionModelVersion = 'realtime-live';
+  } else if (capture.audioBlobKey && transcriptionResolved) {
     try {
       const audio = await downloadBlob({ bucket: AUDIO_BUCKET, key: capture.audioBlobKey });
       const provider = getTranscriptionProvider(transcriptionResolved.config);

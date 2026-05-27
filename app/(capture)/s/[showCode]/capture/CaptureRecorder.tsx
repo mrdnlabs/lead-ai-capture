@@ -196,10 +196,12 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     if (!file) return;
     setPhotoFile(file);
     setPhotoPreviewUrl(URL.createObjectURL(file));
-    // If a live session is going, also feed the photo to Gemini so the AI can
-    // see it mid-conversation. No-op if not live; the photo is uploaded with
-    // the capture regardless.
-    void realtime.sendImage(file);
+    // If a live session is going, run the photo through the structured vision
+    // pipeline server-side and inject the result into the AI conversation as
+    // facts (the AI then decides what to do with them — set_lead_field,
+    // match_existing_lead, etc.). No-op if not live; the photo is uploaded
+    // with the capture on Submit regardless.
+    void realtime.sendImage(file, showSlug);
   }
 
   async function submit() {
@@ -390,8 +392,12 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
               />
               <div className="flex-1 text-xs text-neutral-600">
                 Photo attached
-                {realtime.status === 'live' ? (
-                  <span className="ml-1 text-emerald-700">· sent to AI</span>
+                {realtime.status === 'live' && realtime.imageExtractStatus === 'done' ? (
+                  <span className="ml-1 text-emerald-700">· read by AI</span>
+                ) : realtime.status === 'live' && realtime.imageExtractStatus === 'extracting' ? (
+                  <span className="ml-1 text-sky-700">· reading…</span>
+                ) : realtime.status === 'live' && realtime.imageExtractStatus === 'error' ? (
+                  <span className="ml-1 text-red-700">· read failed</span>
                 ) : null}
               </div>
               <button
@@ -643,6 +649,15 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
                   }
                 />
                 AI {realtime.status}
+                {realtime.imageExtractStatus === 'extracting' ? (
+                  <span className="ml-2 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-800">
+                    Reading badge…
+                  </span>
+                ) : realtime.imageExtractStatus === 'error' ? (
+                  <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-800">
+                    Badge OCR failed
+                  </span>
+                ) : null}
               </div>
               {realtime.error ? (
                 <div className="mt-1 rounded bg-red-50 p-2 text-red-700">{realtime.error}</div>

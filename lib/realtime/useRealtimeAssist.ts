@@ -5,6 +5,8 @@ import { logDebug } from '@/lib/debug/log';
 
 export type RealtimeStatus = 'idle' | 'connecting' | 'live' | 'closing' | 'closed' | 'error';
 
+export type ImageExtractStatus = 'idle' | 'extracting' | 'done' | 'error';
+
 export interface TranscriptEntry {
   role: 'user' | 'assistant';
   text: string;
@@ -121,6 +123,7 @@ export function useRealtimeAssist() {
   const [requiredFields, setRequiredFields] = useState<RequiredField[]>([]);
   const [liveFields, setLiveFields] = useState<LiveFields>({});
   const [existingLeadMatches, setExistingLeadMatches] = useState<ExistingLeadMatch[]>([]);
+  const [imageExtractStatus, setImageExtractStatus] = useState<ImageExtractStatus>('idle');
   // Recent-lead snapshot from the token endpoint — keyed by opportunityCode so
   // we can prefill the checklist instantly when the AI flags a match.
   const existingLeadsRef = useRef<Map<string, Record<string, string>>>(new Map());
@@ -245,34 +248,89 @@ export function useRealtimeAssist() {
   }, []);
 
   /**
-   * Inject an image into the live conversation. Gemini Live treats single
-   * images as one-frame video input — same wrapper as audio, different key.
-   * The AI can then describe / extract from the image and weave it into the
-   * conversation ("I see Sarah Chen, VP Engineering at Acme on the badge…").
+   * Inject an image into the live conversation by running it through the
+   * server's structured vision pipeline FIRST, then posting the extracted
+   * fields to the WSS as a [system] note. The AI never sees raw bytes
+   * during the live call — only clean structured facts — which fixes a
+   * hallucination problem with Gemini Live's in-conversation image reading.
+   *
+   * Nothing is auto-populated into the checklist. The AI decides which
+   * values to commit via set_lead_field, and whether to call
+   * match_existing_lead — same control plane as text-only conversations.
+   *
+   * The raw photo still uploads via /api/captures on Submit (unchanged) —
+   * this endpoint does not persist anything.
    *
    * No-op when the session isn't live, so it's safe to call unconditionally
    * whenever a photo is selected.
    */
-  const sendImage = useCallback(async (blob: Blob): Promise<boolean> => {
+  const sendImage = useCallback(async (blob: Blob, showSlug: string): Promise<boolean> => {
     const ctx = ctxRef.current;
     if (!ctx || ctx.ws.readyState !== WebSocket.OPEN) return false;
-    const buf = await blob.arrayBuffer();
-    let binary = '';
-    const bytes = new Uint8Array(buf);
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    const data = btoa(binary);
-    wsSendLogged(ctx, 'photo_attach', {
-      realtimeInput: {
-        video: { data, mimeType: blob.type || 'image/jpeg' },
-      },
-    });
-    // Hint to the model: "the rep just attached a photo — look at it"
-    wsSendLogged(ctx, 'photo_attach_hint', {
-      realtimeInput: {
-        text: 'The rep just attached a photo — likely the lead\'s name badge or a business card. Take a look and acknowledge or extract what you see.',
-      },
-    });
-    return true;
+
+    setImageExtractStatus('extracting');
+    let fields: Record<string, unknown> | null = null;
+    let errorMsg: string | null = null;
+    try {
+      const fd = new FormData();
+      fd.set('showSlug', showSlug);
+      fd.set('photo', blob, 'photo.' + (blob.type.includes('png') ? 'png' : 'jpg'));
+      const res = await fetch('/api/realtime/vision-extract', {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: fd,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        errorMsg = body.error ?? `HTTP ${res.status}`;
+      } else {
+        const body = (await res.json()) as { fields: Record<string, unknown> };
+        fields = body.fields;
+      }
+    } catch (e) {
+      errorMsg = (e as Error).message;
+    }
+
+    if (fields) {
+      logDebug(ctx.sessionId, 'event', 'vision_extract_result', fields);
+      // Build a compact, scannable representation. We strip null/empty so the
+      // AI doesn't see "name: null" and treat it as a known-empty fact.
+      const compact: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(fields)) {
+        if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) continue;
+        compact[k] = v;
+      }
+      const visible = Object.keys(compact).length > 0
+        ? JSON.stringify(compact, null, 2)
+        : '(vision returned no readable fields)';
+
+      wsSendLogged(ctx, 'photo_vision_result', {
+        realtimeInput: {
+          text:
+            '[system] The rep just attached a photo of a badge or business card. ' +
+            'A structured vision pass extracted these fields from the printed text:\n' +
+            visible +
+            '\n\n' +
+            'These are facts from the printed card — high confidence on identity fields. Now:\n' +
+            '1. Compare against EXISTING LEADS. If this matches one, call match_existing_lead.\n' +
+            '2. Call set_lead_field for each value you want committed to the checklist (this is the ONLY way values land on the checklist — nothing is auto-populated from the OCR).\n' +
+            "3. Ask the rep about anything the card doesn't cover (interest level, decision-making role, next steps, etc.).",
+        },
+      });
+      setImageExtractStatus('done');
+    } else {
+      logDebug(ctx.sessionId, 'event', 'vision_extract_failed', { error: errorMsg });
+      wsSendLogged(ctx, 'photo_vision_failed', {
+        realtimeInput: {
+          text:
+            '[system] The rep attached a photo but the server-side vision extraction failed (' +
+            (errorMsg ?? 'unknown error') +
+            '). Ask the rep to describe what is on the card so you can capture it manually.',
+        },
+      });
+      setImageExtractStatus('error');
+    }
+    return fields !== null;
   }, []);
 
   useEffect(() => {
@@ -288,6 +346,7 @@ export function useRealtimeAssist() {
       setTranscript([]);
       setLiveFields({});
       setExistingLeadMatches([]);
+      setImageExtractStatus('idle');
 
       // 1. Mint token from our server
       const tokenRes = await fetch('/api/realtime/token', {
@@ -455,6 +514,7 @@ export function useRealtimeAssist() {
     stop,
     sendImage,
     sendText,
+    imageExtractStatus,
   };
 }
 

@@ -16,7 +16,7 @@ async function main() {
   try {
     const res = await db
       .update(schema.providerConfigs)
-      .set({ model: 'gemini-2.5-flash-native-audio-latest' })
+      .set({ model: 'gemini-3.1-flash-live-preview' })
       .where(and(eq(schema.providerConfigs.kind, 'realtime'), eq(schema.providerConfigs.provider, 'gemini')))
       .returning({ id: schema.providerConfigs.id, model: schema.providerConfigs.model });
     console.log('Updated configs:', res);

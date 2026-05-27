@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { desc } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { providerCredentials } from '@/db/schema';
+import { listAvailableFallbacks } from '@/lib/providers/fallback';
 import { AddCredentialForm } from './AddCredentialForm';
 import { CredentialActions } from './CredentialRow';
 
@@ -24,6 +25,7 @@ export default async function ProvidersPage() {
     .select()
     .from(providerCredentials)
     .orderBy(desc(providerCredentials.createdAt));
+  const fallbacks = listAvailableFallbacks();
 
   return (
     <div className="space-y-8">
@@ -35,6 +37,23 @@ export default async function ProvidersPage() {
           tokens minted server-side per session.
         </p>
       </header>
+
+      {fallbacks.length > 0 ? (
+        <section className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm">
+          <div className="font-medium text-blue-900">Server defaults active</div>
+          <div className="mt-1 text-blue-800">
+            When no admin-configured credential exists for a provider, the app falls back to
+            server-side env keys. Currently active fallbacks:{' '}
+            {fallbacks.map((f, i) => (
+              <span key={f.kind}>
+                {i > 0 && ', '}
+                <code className="font-mono">{f.kind}</code> → {f.provider}/{f.model}
+              </span>
+            ))}
+            . Add a credential below to override.
+          </div>
+        </section>
+      ) : null}
 
       <section className="rounded-lg border border-neutral-200">
         <table className="w-full text-sm">

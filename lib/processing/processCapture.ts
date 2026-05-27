@@ -19,6 +19,7 @@ import {
   resolveProviderConfig,
   resolveShadowProviderConfig,
 } from '@/lib/providers/registry';
+import { resolveProviderForKind } from '@/lib/providers/resolve';
 import { findDuplicateLead, mergeIntoExistingOpportunity } from './dedupe';
 import { reconcileFields } from './reconcile';
 import { AUDIO_BUCKET, PHOTO_BUCKET, downloadBlob } from '@/lib/storage/server';
@@ -114,40 +115,49 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
     ...customFields.filter((f) => f.required).map((f) => f.key),
   ];
 
-  // 3. Resolve provider configs
-  const [transcriptionConfig, visionConfig, extractionConfig] = await Promise.all([
-    resolveProviderConfig({
+  // 3. Resolve providers (user config first, then server env fallback)
+  const [transcriptionResolved, visionResolved, extractionResolved] = await Promise.all([
+    resolveProviderForKind({
       showId: show.id,
       kind: 'transcription',
       overrideConfigId: show.transcriptionProviderConfigId,
+      purpose: 'transcription',
+      contextId: captureId,
     }),
-    resolveProviderConfig({
+    resolveProviderForKind({
       showId: show.id,
       kind: 'vision',
       overrideConfigId: show.visionProviderConfigId,
+      purpose: 'vision',
+      contextId: captureId,
     }),
-    resolveProviderConfig({
+    resolveProviderForKind({
       showId: show.id,
       kind: 'extraction',
       overrideConfigId: show.extractionProviderConfigId,
+      purpose: 'extraction',
+      contextId: captureId,
     }),
   ]);
+  const transcriptionConfig = transcriptionResolved?.config ?? null;
+  const visionConfig = visionResolved?.config ?? null;
+  const extractionConfig = extractionResolved?.config ?? null;
 
-  // 4. Transcribe (if audio + transcription config)
+  // 4. Transcribe (if audio + transcription provider)
   let transcript = '';
   let transcriptLatencyMs: number | undefined;
   let transcriptCost: number | undefined;
   let transcriptionModelVersion: string | undefined;
-  if (capture.audioBlobKey && transcriptionConfig) {
+  if (capture.audioBlobKey && transcriptionResolved) {
     try {
       const audio = await downloadBlob({ bucket: AUDIO_BUCKET, key: capture.audioBlobKey });
-      const credential = await loadCredential(transcriptionConfig.credentialId, {
-        purpose: 'transcription',
-        contextId: captureId,
-      });
-      const provider = getTranscriptionProvider(transcriptionConfig);
+      const provider = getTranscriptionProvider(transcriptionResolved.config);
       const result = await provider.transcribe({
-        ctx: { config: transcriptionConfig, credential, captureId },
+        ctx: {
+          config: transcriptionResolved.config,
+          credential: transcriptionResolved.credential,
+          captureId,
+        },
         audio: audio.buffer,
         mimeType: audio.mimeType,
       });
@@ -160,23 +170,23 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
     }
   }
 
-  // 5. Vision-extract (if photo + vision config)
+  // 5. Vision-extract (if photo + vision provider)
   let badgeFields: Record<string, unknown> = {};
   let visionLatencyMs: number | undefined;
   let visionModelVersion: string | undefined;
-  if (capture.photoBlobKey && visionConfig) {
+  if (capture.photoBlobKey && visionResolved) {
     try {
       const photo = await downloadBlob({ bucket: PHOTO_BUCKET, key: capture.photoBlobKey });
-      const credential = await loadCredential(visionConfig.credentialId, {
-        purpose: 'vision',
-        contextId: captureId,
-      });
-      const provider = getVisionProvider(visionConfig);
+      const provider = getVisionProvider(visionResolved.config);
       const instructions =
-        visionConfig.defaultInstructions ||
+        visionResolved.config.defaultInstructions ||
         'You are looking at a photo of a person\'s trade-show name badge. Extract the visible fields. If a field is not visible or unreadable, leave it out — do not guess.';
       const result = await provider.extractFromImage({
-        ctx: { config: visionConfig, credential, captureId },
+        ctx: {
+          config: visionResolved.config,
+          credential: visionResolved.credential,
+          captureId,
+        },
         image: photo.buffer,
         mimeType: photo.mimeType,
         schema: leadSchema,
@@ -190,22 +200,22 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
     }
   }
 
-  // 6. Extract from transcript (if transcript + extraction config)
+  // 6. Extract from transcript (if transcript + extraction provider)
   let transcriptFields: Record<string, unknown> = {};
   let extractionLatencyMs: number | undefined;
   let extractionModelVersion: string | undefined;
-  if (transcript && extractionConfig) {
+  if (transcript && extractionResolved) {
     try {
-      const credential = await loadCredential(extractionConfig.credentialId, {
-        purpose: 'extraction',
-        contextId: captureId,
-      });
-      const provider = getExtractionProvider(extractionConfig);
+      const provider = getExtractionProvider(extractionResolved.config);
       const instructions =
-        extractionConfig.defaultInstructions ||
+        extractionResolved.config.defaultInstructions ||
         'Extract lead information from this trade-show conversation transcript. The rep is talking about a lead they met. Extract only what the rep actually said or implied — do not invent facts.';
       const result = await provider.extractFromText({
-        ctx: { config: extractionConfig, credential, captureId },
+        ctx: {
+          config: extractionResolved.config,
+          credential: extractionResolved.credential,
+          captureId,
+        },
         text: transcript,
         schema: leadSchema,
         instructions,
@@ -222,19 +232,15 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
   let mergedNew: Record<string, unknown> = {};
   let confidenceScores: Record<string, number> = {};
   if (
-    extractionConfig &&
+    extractionResolved &&
     (Object.keys(badgeFields).length > 0 || Object.keys(transcriptFields).length > 0)
   ) {
     try {
-      const credential = await loadCredential(extractionConfig.credentialId, {
-        purpose: 'reconciliation',
-        contextId: captureId,
-      });
       const reconciled = await reconcileFields({
         badgeFields,
         transcriptFields,
-        extractionConfig,
-        credentialApiKey: credential.apiKey,
+        extractionConfig: extractionResolved.config,
+        credentialApiKey: extractionResolved.credential.apiKey,
         captureId,
       });
       mergedNew = reconciled.mergedFields;
@@ -269,18 +275,14 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
 
   // 7b. AI dedupe — does this match an existing lead in the show?
   let dedupeApplied = false;
-  if (extractionConfig && Object.keys(mergedNew).length > 0) {
+  if (extractionResolved && Object.keys(mergedNew).length > 0) {
     try {
-      const credential = await loadCredential(extractionConfig.credentialId, {
-        purpose: 'dedupe',
-        contextId: captureId,
-      });
       const dedupeResult = await findDuplicateLead({
         newFields: mergedNew,
         showId: show.id,
         excludeOpportunityId: capture.opportunityId,
-        extractionConfig,
-        credentialApiKey: credential.apiKey,
+        extractionConfig: extractionResolved.config,
+        credentialApiKey: extractionResolved.credential.apiKey,
         captureId,
       });
       if (dedupeResult.matchedOpportunityId) {

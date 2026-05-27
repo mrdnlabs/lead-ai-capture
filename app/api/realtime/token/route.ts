@@ -5,8 +5,7 @@ import { db } from '@/db/client';
 import { customFieldDefinitions, leadForms, leads, opportunities } from '@/db/schema';
 import { requireRep } from '@/lib/auth/currentRep';
 import { getRealtimeProvider } from '@/lib/providers/realtime';
-import { loadCredential } from '@/lib/providers/credentials';
-import { resolveProviderConfig } from '@/lib/providers/registry';
+import { resolveProviderForKind } from '@/lib/providers/resolve';
 import { getShowMembership } from '@/lib/showAccess';
 
 const requestSchema = z.object({
@@ -95,22 +94,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Not a member of this show' }, { status: 403 });
   }
 
-  const realtimeConfig = await resolveProviderConfig({
+  const resolved = await resolveProviderForKind({
     showId: membership.show.id,
     kind: 'realtime',
     overrideConfigId: membership.show.realtimeProviderConfigId,
-  });
-  if (!realtimeConfig) {
-    return NextResponse.json(
-      { error: 'No realtime provider configured. Set one up at /admin/configs.' },
-      { status: 400 },
-    );
-  }
-
-  const credential = await loadCredential(realtimeConfig.credentialId, {
     purpose: 'realtime_token_mint',
     accessedByRepId: rep.id,
   });
+  if (!resolved) {
+    return NextResponse.json(
+      {
+        error:
+          'No realtime provider configured and no DEFAULT_GEMINI_API_KEY env var set. Configure one at /admin/configs.',
+      },
+      { status: 400 },
+    );
+  }
+  const { config: realtimeConfig, credential } = resolved;
   const provider = getRealtimeProvider(realtimeConfig);
 
   const instructions = await buildAgentContext(

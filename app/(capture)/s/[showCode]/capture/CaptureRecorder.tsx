@@ -80,6 +80,20 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     }
   }, [simulatedOffline]);
 
+  // When the live AI calls end_conversation, treat it as the rep tapping
+  // "Stop & submit" — close the session and submit the capture automatically.
+  // Guarded so we only fire once per session.
+  const endHandledRef = useRef<number | null>(null);
+  useEffect(() => {
+    const req = realtime.endRequested;
+    if (!req) return;
+    if (endHandledRef.current === req.at) return;
+    endHandledRef.current = req.at;
+    if (state === 'ready' || state === 'recording') {
+      void submit();
+    }
+  }, [realtime.endRequested, state]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function startRecording() {
     setError(null);
     try {

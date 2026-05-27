@@ -76,19 +76,30 @@ export async function loadRecentLeads(
     .where(eq(opportunities.showId, showId))
     .orderBy(desc(leads.lastUpdatedAt))
     .limit(limit);
-  return rows.map((r) => {
-    const fields = r.mergedFields as Record<string, unknown>;
-    const knownFields: Record<string, string> = {};
-    for (const [k, v] of Object.entries(fields)) {
-      if (v == null || v === '') continue;
-      knownFields[k] = typeof v === 'string' ? v : JSON.stringify(v);
-    }
-    const out: RecentLeadSummary = { opportunityCode: r.opportunityCode, knownFields };
-    if (typeof fields.name === 'string') out.name = fields.name;
-    if (typeof fields.company === 'string') out.company = fields.company;
-    if (typeof fields.title === 'string') out.title = fields.title;
-    return out;
-  });
+  return rows
+    .map((r): RecentLeadSummary | null => {
+      const fields = r.mergedFields as Record<string, unknown>;
+      const knownFields: Record<string, string> = {};
+      for (const [k, v] of Object.entries(fields)) {
+        if (v == null || v === '') continue;
+        knownFields[k] = typeof v === 'string' ? v : JSON.stringify(v);
+      }
+      const out: RecentLeadSummary = { opportunityCode: r.opportunityCode, knownFields };
+      if (typeof fields.name === 'string') out.name = fields.name;
+      if (typeof fields.company === 'string') out.company = fields.company;
+      if (typeof fields.title === 'string') out.title = fields.title;
+      // Drop unidentifiable leads — they can never plausibly match a new lead's
+      // description and just give the model a tempting "default" code to pick.
+      // A lead needs at least a name or a company to be a useful candidate.
+      const hasNameOrCompany =
+        (typeof fields.name === 'string' && fields.name.trim() !== '') ||
+        (typeof fields.first_name === 'string' && fields.first_name.trim() !== '') ||
+        (typeof fields.last_name === 'string' && fields.last_name.trim() !== '') ||
+        (typeof fields.company === 'string' && fields.company.trim() !== '');
+      if (!hasNameOrCompany) return null;
+      return out;
+    })
+    .filter((x): x is RecentLeadSummary => x !== null);
 }
 
 export function formatRecentLeads(recent: RecentLeadSummary[]): string {
@@ -162,10 +173,12 @@ CRITICAL: USE THE set_lead_field TOOL whenever the rep tells you a value.
 - The checklist UI updates live from these tool calls — that's how the rep knows what's been captured.
 
 RECOGNIZING RETURNING LEADS (this is a GOOD thing — repeat visits mean engagement):
-- As soon as the rep mentions a name + company that matches (even loosely) anything in the EXISTING LEADS list, call \`match_existing_lead({opportunityCode, reason})\` with the matching code.
-- A banner appears for the rep to confirm. Don't wait for full info — flag the match early so the conversation can focus on NEW info (interest level, next steps, updated title) instead of re-collecting basics.
-- If the rep says "this is the same person" or "didn't I talk to them already?", call the tool immediately.
-- Match heuristics: same first name + same company is enough; phonetically similar names (e.g. "Dave" / "David") count; same email domain + similar name counts.
+- ONLY call \`match_existing_lead({opportunityCode, reason})\` when an actual candidate from EXISTING LEADS plausibly matches what the rep described. If nothing in the list fits, DO NOT call the tool — silently proceed as a new lead and use set_lead_field for the captured info.
+- Never pick a code "just because you have to". If you're not at least somewhat confident, skip the tool entirely.
+- When you do call it, flag early — don't wait for full info — so the conversation can focus on NEW info (interest level, next steps, updated title) instead of re-collecting basics.
+- If the rep says "this is the same person" or "didn't I talk to them already?", call the tool immediately with the right code.
+- Match heuristics that DO count: same first name + same company; phonetically similar names (e.g. "Dave" / "David") at the same company; same email domain + similar name; rep explicitly says it's the same person.
+- Heuristics that do NOT count by themselves: same email domain alone (multiple people share company emails); same surname alone; same first name alone at a different company.
 - Once a match is confirmed, treat this as ADDING TO an existing lead — skip questions whose answers are already known; ask the rep what's NEW or CHANGED since the last visit.
 
 SPELLING / ACCURACY (especially for names, companies, emails, phone):
@@ -176,10 +189,11 @@ SPELLING / ACCURACY (especially for names, companies, emails, phone):
 
 CONVERSATION STYLE:
 - Speak briefly. One short question at a time.
-- If the rep says "done" or "that's it", wrap up immediately.
+- If the rep says "done", "that's it", "all set", "nothing else", "wrap it up", etc., call \`end_conversation({reason})\` immediately. This closes the session and submits the capture — the rep does not have to tap anything else.
+- Don't keep asking once they're clearly finished. One follow-up at most ("anything else before we wrap?"), then end.
 - If the rep pauses >5 seconds, stay quiet — they may be still talking to the actual lead at the booth.
 - Never invent details. Only capture what the rep actually says.
-- Stop after 90 seconds even without "done".
+- Hard stop after 90 seconds even without "done".
 
 LEAD FORM FIELDS to collect (call set_lead_field with these keys):
 ${args.fields.map((f) => `  ${f.required ? '★' : ' '} ${f.key}: ${f.label}${f.aiHint ? ` — ${f.aiHint}` : ''}`).join('\n')}`;
@@ -228,7 +242,7 @@ export function buildToolDeclarations(
     {
       name: 'match_existing_lead',
       description:
-        'Call as soon as you recognize the lead from the EXISTING LEADS list. The rep confirms and the capture adds to that lead instead of creating a new one.',
+        'Call ONLY when an actual candidate from the EXISTING LEADS list plausibly matches the lead the rep is describing. If nothing fits, do NOT call this tool — proceed as a new lead. Never pick a code "just because you have to".',
       parameters: {
         type: 'object',
         properties: {
@@ -246,6 +260,22 @@ export function buildToolDeclarations(
           },
         },
         required: ['opportunityCode', 'reason'],
+      },
+    },
+    {
+      name: 'end_conversation',
+      description:
+        'Call when the rep has clearly indicated they are done ("done", "that\'s it", "all set", "nothing else", etc.). Closes the live AI session AND submits the capture — the rep does not have to tap anything else.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: {
+            type: 'string',
+            description:
+              'Short summary of why we are wrapping — e.g. "rep said done, all required fields captured".',
+          },
+        },
+        required: ['reason'],
       },
     },
   ];

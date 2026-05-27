@@ -124,6 +124,9 @@ export function useRealtimeAssist() {
   const [liveFields, setLiveFields] = useState<LiveFields>({});
   const [existingLeadMatches, setExistingLeadMatches] = useState<ExistingLeadMatch[]>([]);
   const [imageExtractStatus, setImageExtractStatus] = useState<ImageExtractStatus>('idle');
+  // Set when the AI calls end_conversation — CaptureRecorder observes this
+  // and triggers its own submit() flow.
+  const [endRequested, setEndRequested] = useState<{ reason: string; at: number } | null>(null);
   // Recent-lead snapshot from the token endpoint — keyed by opportunityCode so
   // we can prefill the checklist instantly when the AI flags a match.
   const existingLeadsRef = useRef<Map<string, Record<string, string>>>(new Map());
@@ -132,8 +135,22 @@ export function useRealtimeAssist() {
   const prefillOriginRef = useRef<Map<string, Set<string>>>(new Map());
   const ctxRef = useRef<RealtimeContext | null>(null);
   const startedRef = useRef(false);
+  // Inactivity timer — fires stop() after the rep is quiet for this long.
+  // Reset on every detected rep activity (typed text, transcribed mic input,
+  // photo attach). Not reset by AI output alone — the AI talking to itself
+  // shouldn't extend the session.
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const INACTIVITY_TIMEOUT_MS = 30_000;
+
+  const cancelInactivityTimer = useCallback(() => {
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current);
+      inactivityTimerRef.current = null;
+    }
+  }, []);
 
   const stop = useCallback(() => {
+    cancelInactivityTimer();
     const ctx = ctxRef.current;
     if (!ctx) return;
     setStatus('closing');
@@ -149,7 +166,20 @@ export function useRealtimeAssist() {
     ctxRef.current = null;
     startedRef.current = false;
     setStatus('closed');
-  }, []);
+  }, [cancelInactivityTimer]);
+
+  const resetInactivityTimer = useCallback(() => {
+    cancelInactivityTimer();
+    inactivityTimerRef.current = setTimeout(() => {
+      const ctx = ctxRef.current;
+      if (ctx) {
+        logDebug(ctx.sessionId, 'event', 'session_inactivity_timeout', {
+          afterMs: INACTIVITY_TIMEOUT_MS,
+        });
+      }
+      stop();
+    }, INACTIVITY_TIMEOUT_MS);
+  }, [cancelInactivityTimer, stop]);
 
   /**
    * Fired when the AI calls match_existing_lead. Prefills the checklist with
@@ -244,8 +274,9 @@ export function useRealtimeAssist() {
     if (!ctx || ctx.ws.readyState !== WebSocket.OPEN) return false;
     wsSendLogged(ctx, 'user_text', { realtimeInput: { text: trimmed } });
     setTranscript((cur) => [...cur, { role: 'user', text: trimmed, at: Date.now() }]);
+    resetInactivityTimer();
     return true;
-  }, []);
+  }, [resetInactivityTimer]);
 
   /**
    * Inject an image into the live conversation by running it through the
@@ -268,6 +299,7 @@ export function useRealtimeAssist() {
     const ctx = ctxRef.current;
     if (!ctx || ctx.ws.readyState !== WebSocket.OPEN) return false;
 
+    resetInactivityTimer();
     setImageExtractStatus('extracting');
     let fields: Record<string, unknown> | null = null;
     let errorMsg: string | null = null;
@@ -331,7 +363,7 @@ export function useRealtimeAssist() {
       setImageExtractStatus('error');
     }
     return fields !== null;
-  }, []);
+  }, [resetInactivityTimer]);
 
   useEffect(() => {
     return () => stop();
@@ -347,6 +379,7 @@ export function useRealtimeAssist() {
       setLiveFields({});
       setExistingLeadMatches([]);
       setImageExtractStatus('idle');
+      setEndRequested(null);
 
       // 1. Mint token from our server
       const tokenRes = await fetch('/api/realtime/token', {
@@ -432,6 +465,7 @@ export function useRealtimeAssist() {
         setStatus('live');
         startMicStreaming(ctx, source, audioCtx, ws);
         logDebug(sessionId, 'event', 'ws_open', { readyState: ws.readyState });
+        resetInactivityTimer();
       };
 
       ws.onerror = (e) => {
@@ -484,6 +518,10 @@ export function useRealtimeAssist() {
             // Optimistically prefill — rep can roll back via the banner.
             applyExistingLeadPrefill(opportunityCode);
           },
+          (reason) => {
+            setEndRequested({ reason, at: Date.now() });
+          },
+          resetInactivityTimer,
         );
 
       // 4. Auto-stop at max duration
@@ -493,7 +531,7 @@ export function useRealtimeAssist() {
         }, args.maxDurationSec * 1000);
       }
     },
-    [status, stop, applyExistingLeadPrefill],
+    [status, stop, applyExistingLeadPrefill, resetInactivityTimer],
   );
 
   return {
@@ -515,6 +553,9 @@ export function useRealtimeAssist() {
     sendImage,
     sendText,
     imageExtractStatus,
+    /** Non-null when the AI called end_conversation. Watch this from the UI
+     *  to auto-submit + close. */
+    endRequested,
   };
 }
 
@@ -600,6 +641,8 @@ function handleServerMessage(
   pushTranscript: (entry: TranscriptEntry) => void,
   setField: (key: string, value: string, confidence?: number) => void,
   matchExistingLead: (opportunityCode: string, reason: string) => void,
+  endConversation: (reason: string) => void,
+  onRepActivity: () => void,
 ) {
   const text = messageToText(e.data);
   if (!text) return;
@@ -632,6 +675,8 @@ function handleServerMessage(
       text: msg.serverContent.inputTranscription.text,
       at: Date.now(),
     });
+    // Rep speaking counts as activity — reset the inactivity timer.
+    onRepActivity();
   }
   if (msg.serverContent?.outputTranscription?.text) {
     pushTranscript({
@@ -682,7 +727,13 @@ function handleServerMessage(
         const opportunityCode =
           typeof args.opportunityCode === 'string' ? args.opportunityCode : null;
         const reason = typeof args.reason === 'string' ? args.reason : '';
-        if (opportunityCode) {
+        // Defensive: the AI sometimes calls this with a "no match" reason
+        // (the enum forces a code but the reasoning negates the call). Drop
+        // those so the rep doesn't see a contradictory banner.
+        const reasonSaysNoMatch = /\bno\b.*\b(match|existing|candidate)\b|doesn['’]?t match|don['’]?t match|not the same|new lead/i.test(
+          reason,
+        );
+        if (opportunityCode && !reasonSaysNoMatch) {
           matchExistingLead(opportunityCode, reason);
           responses.push({
             id: call.id,
@@ -692,6 +743,16 @@ function handleServerMessage(
               note: 'Rep notified — waiting for their confirm.',
             },
           });
+        } else if (reasonSaysNoMatch) {
+          responses.push({
+            id: call.id,
+            name: call.name,
+            response: {
+              ok: false,
+              error:
+                'Your reason indicates no actual match. Do not call match_existing_lead unless a candidate truly fits — proceed as a new lead instead.',
+            },
+          });
         } else {
           responses.push({
             id: call.id,
@@ -699,6 +760,14 @@ function handleServerMessage(
             response: { ok: false, error: 'missing opportunityCode' },
           });
         }
+      } else if (call.name === 'end_conversation') {
+        const reason = typeof args.reason === 'string' ? args.reason : 'rep indicated done';
+        endConversation(reason);
+        responses.push({
+          id: call.id,
+          name: call.name,
+          response: { ok: true, note: 'Session closing — capture will be submitted.' },
+        });
       } else {
         responses.push({
           id: call.id,

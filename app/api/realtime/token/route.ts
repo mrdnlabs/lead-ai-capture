@@ -10,28 +10,32 @@ import { getShowMembership } from '@/lib/showAccess';
 
 const requestSchema = z.object({
   showSlug: z.string().min(1),
-  opportunityCode: z.string().min(1).transform((s) => s.toUpperCase()),
+  // Capture flow now auto-creates opportunities — code is optional here.
+  opportunityCode: z
+    .string()
+    .optional()
+    .transform((s) => (s ? s.toUpperCase() : undefined)),
   maxDurationSec: z.number().int().min(15).max(900).optional(),
 });
 
-async function buildAgentContext(showId: string, opportunityCode: string, repName: string | null, showName: string) {
-  const [opp] = await db
-    .select()
-    .from(opportunities)
-    .where(and(eq(opportunities.showId, showId), eq(opportunities.code, opportunityCode)))
-    .limit(1);
+async function buildAgentContext(
+  showId: string,
+  opportunityCode: string | undefined,
+  repName: string | null,
+  showName: string,
+) {
+  const [opp] = opportunityCode
+    ? await db
+        .select()
+        .from(opportunities)
+        .where(and(eq(opportunities.showId, showId), eq(opportunities.code, opportunityCode)))
+        .limit(1)
+    : [];
   const [lead] = opp
     ? await db.select().from(leads).where(eq(leads.opportunityId, opp.id)).limit(1)
     : [];
 
   let formFields: Array<{ key: string; label: string; aiHint: string | null }> = [];
-  const [show] = opp
-    ? await db.select().from(opportunities).where(eq(opportunities.id, opp.id)).limit(1)
-    : [];
-  if (show) {
-    // Look up the show's lead form's custom fields (we need show.leadFormId, but we
-    // only fetched opp not show — keep this lightweight by skipping form lookup if absent).
-  }
   const [showRow] = await db.select().from((await import('@/db/schema')).shows).where(eq((await import('@/db/schema')).shows.id, showId)).limit(1);
   if (showRow?.leadFormId) {
     const [form] = await db.select().from(leadForms).where(eq(leadForms.id, showRow.leadFormId)).limit(1);
@@ -54,11 +58,11 @@ async function buildAgentContext(showId: string, opportunityCode: string, repNam
   return `You are a trade-show lead-capture assistant helping ${repName ?? 'a rep'} at "${showName}".
 You and the rep are having a short voice conversation about a lead they just met.
 
-CURRENT KNOWN INFO about this lead (opportunity ${opportunityCode}):
+CURRENT KNOWN INFO about this lead${opportunityCode ? ` (opportunity ${opportunityCode})` : ' (new — opportunity will be assigned by AI dedupe later)'}:
 ${JSON.stringify(known, null, 2)}
 
 FIELDS STILL MISSING (ask gap-filling questions ONLY about these — never repeat known info):
-${missing.length > 0 ? missing.join(', ') : '(none — just listen and confirm)'}
+${missing.length > 0 ? missing.join(', ') : '(none yet — listen to learn the lead\'s basics: name, company, role, contact info, and any qualifying details)'}
 
 GUIDELINES:
 - Speak briefly and naturally, like a colleague taking notes.

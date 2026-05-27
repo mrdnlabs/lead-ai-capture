@@ -309,7 +309,7 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
           </span>
         </label>
 
-        {realtime.status === 'live' || realtime.transcript.length > 0 ? (
+        {realtime.status !== 'idle' && realtime.status !== 'closed' ? (
           <div className="mt-3 max-h-44 overflow-y-auto rounded-md border border-neutral-200 bg-neutral-50 p-2 text-xs">
             <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-neutral-500">
               <span
@@ -319,16 +319,22 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
                     ? 'animate-pulse bg-green-500'
                     : realtime.status === 'error'
                       ? 'bg-red-500'
-                      : 'bg-neutral-300')
+                      : realtime.status === 'connecting'
+                        ? 'animate-pulse bg-amber-500'
+                        : 'bg-neutral-300')
                 }
               />
               AI {realtime.status}
-              {realtime.error ? <span className="text-red-600">· {realtime.error}</span> : null}
             </div>
+            {realtime.error ? (
+              <div className="mt-1 rounded bg-red-50 p-2 text-red-700">{realtime.error}</div>
+            ) : null}
             {realtime.transcript.length === 0 ? (
-              <div className="text-neutral-400">Listening…</div>
+              <div className="mt-1 text-neutral-400">
+                {realtime.status === 'connecting' ? 'Connecting to Gemini…' : 'Listening…'}
+              </div>
             ) : (
-              <div className="space-y-1">
+              <div className="mt-1 space-y-1">
                 {realtime.transcript.map((t, i) => (
                   <div key={i} className={t.role === 'assistant' ? 'text-blue-700' : 'text-neutral-700'}>
                     <span className="font-medium">{t.role === 'assistant' ? 'AI' : 'You'}:</span> {t.text}

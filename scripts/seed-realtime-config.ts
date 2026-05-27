@@ -39,7 +39,7 @@ async function main() {
       .values({
         kind: 'realtime',
         provider: 'gemini',
-        model: 'gemini-2.5-flash-preview-native-audio-dialog',
+        model: 'gemini-2.5-flash-native-audio-latest',
         credentialId: cred.id,
         label: 'Gemini Live (native audio dialog)',
         settings: {},

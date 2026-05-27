@@ -16,6 +16,17 @@ const nextConfig: NextConfig = {
   // for the SW that Serwist owns."
   turbopack: {},
 
+  // Expose the build's commit SHA to the client so we can render a tiny
+  // build indicator. Lets the user (and Claude) tell at a glance which
+  // build the PWA is actually running vs. what's been deployed — important
+  // because the service worker can serve a stale shell across deploys.
+  env: {
+    NEXT_PUBLIC_BUILD_SHA:
+      process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ??
+      process.env.NEXT_PUBLIC_BUILD_SHA ??
+      'dev',
+  },
+
   // PWA-related headers
   async headers() {
     return [

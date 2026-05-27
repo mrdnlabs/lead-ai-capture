@@ -496,6 +496,9 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
             </button>
             <div className="t-tiny mt-3 text-center text-ink-4">
               Audio always saved · offline-ready
+              <span className="op-code ml-2 text-[9px] text-ink-5">
+                build {process.env.NEXT_PUBLIC_BUILD_SHA ?? 'dev'}
+              </span>
             </div>
           </>
         )}

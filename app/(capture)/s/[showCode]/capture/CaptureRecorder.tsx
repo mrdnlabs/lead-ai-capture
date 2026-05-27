@@ -424,12 +424,30 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
             </div>
           ) : null}
           <div className="flex items-stretch gap-2">
+            {/* Camera — uses capture="environment" so mobile goes straight to
+                the rear camera. Falls back to file picker on desktop. */}
             <label
               className="flex cursor-pointer items-center justify-center rounded-md border border-neutral-300 bg-white px-3 text-sm hover:bg-neutral-50"
-              title="Attach photo (camera or library)"
+              title="Take photo with camera"
+            >
+              <span aria-hidden>📷</span>
+              <span className="sr-only">Take photo</span>
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={onPhotoSelected}
+                className="hidden"
+              />
+            </label>
+            {/* Browse — no capture attr, opens the file picker so the rep
+                can pick a photo they took earlier with the regular camera. */}
+            <label
+              className="flex cursor-pointer items-center justify-center rounded-md border border-neutral-300 bg-white px-3 text-sm hover:bg-neutral-50"
+              title="Browse to a photo on this device"
             >
               <span aria-hidden>📎</span>
-              <span className="sr-only">Attach photo</span>
+              <span className="sr-only">Browse photos</span>
               <input
                 type="file"
                 accept="image/*"

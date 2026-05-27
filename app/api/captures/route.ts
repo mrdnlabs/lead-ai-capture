@@ -1,8 +1,8 @@
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { after, NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { db } from '@/db/client';
-import { captures, mediaBlobs } from '@/db/schema';
+import { captures, mediaBlobs, opportunities } from '@/db/schema';
 import { requireRep } from '@/lib/auth/currentRep';
 import { processCapture } from '@/lib/processing/processCapture';
 import {
@@ -16,11 +16,25 @@ import { getOpportunityByCode, getShowMembership } from '@/lib/showAccess';
 
 const metadataSchema = z.object({
   showSlug: z.string().min(1),
-  opportunityCode: z.string().min(1).transform((s) => s.toUpperCase()),
+  // Empty/missing → server auto-creates a placeholder opportunity. AI dedupe re-targets later.
+  opportunityCode: z
+    .string()
+    .optional()
+    .transform((s) => (s ? s.toUpperCase() : undefined)),
   idempotencyKey: z.string().uuid(),
   clientCapturedAt: z.string().datetime(),
   durationMs: z.coerce.number().int().nonnegative().optional(),
 });
+
+function randomOpportunityCode(): string {
+  // 6-char alphanumeric (uppercase, no ambiguous chars). ~30B combos per show.
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 6; i++) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return out;
+}
 
 export async function POST(request: NextRequest): Promise<Response> {
   let rep;
@@ -61,12 +75,43 @@ export async function POST(request: NextRequest): Promise<Response> {
     return NextResponse.json({ error: 'Not a member of this show' }, { status: 403 });
   }
 
-  const opportunity = await getOpportunityByCode(membership.show.id, meta.opportunityCode);
+  // Resolve or create the opportunity. Most captures arrive with no code now;
+  // AI dedupe later in processCapture can re-point the capture to an existing
+  // opportunity if it's actually the same lead.
+  let opportunity = meta.opportunityCode
+    ? await getOpportunityByCode(membership.show.id, meta.opportunityCode)
+    : null;
   if (!opportunity) {
-    return NextResponse.json(
-      { error: `Opportunity ${meta.opportunityCode} not found in show ${meta.showSlug}` },
-      { status: 404 },
-    );
+    const code = meta.opportunityCode ?? randomOpportunityCode();
+    try {
+      const [created] = await db
+        .insert(opportunities)
+        .values({
+          showId: membership.show.id,
+          code,
+          status: 'open',
+          createdByRepId: rep.id,
+        })
+        .returning();
+      opportunity = created;
+    } catch (e) {
+      // Unique violation on (showId, code) — try one retry with a different code.
+      const err = e as { code?: string };
+      if (err.code === '23505') {
+        const [retry] = await db
+          .insert(opportunities)
+          .values({
+            showId: membership.show.id,
+            code: randomOpportunityCode(),
+            status: 'open',
+            createdByRepId: rep.id,
+          })
+          .returning();
+        opportunity = retry;
+      } else {
+        throw e;
+      }
+    }
   }
 
   const existing = await db

@@ -3,7 +3,7 @@ import Dexie, { type Table } from 'dexie';
 export interface OutboxItem {
   id: string;
   showSlug: string;
-  opportunityCode: string;
+  opportunityCode?: string;
   idempotencyKey: string;
   clientCapturedAt: string;
   durationMs?: number;

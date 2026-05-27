@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { desc, eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { leadForms, shows } from '@/db/schema';
+import { NewShowForm } from './NewShowForm';
 
 export default async function ShowsAdminPage() {
   const rows = await db
@@ -48,6 +49,14 @@ export default async function ShowsAdminPage() {
           </li>
         ))}
       </ul>
+
+      <section className="rounded-lg border border-neutral-200 p-4">
+        <h2 className="text-sm font-medium">New show</h2>
+        <p className="mt-1 text-xs text-neutral-500">
+          Creates a show, auto-adds you as admin, then sends you to set up the lead form.
+        </p>
+        <NewShowForm />
+      </section>
     </div>
   );
 }

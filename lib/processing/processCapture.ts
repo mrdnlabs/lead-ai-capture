@@ -19,6 +19,8 @@ import {
   resolveProviderConfig,
   resolveShadowProviderConfig,
 } from '@/lib/providers/registry';
+import { findDuplicateLead, mergeIntoExistingOpportunity } from './dedupe';
+import { reconcileFields } from './reconcile';
 import { AUDIO_BUCKET, PHOTO_BUCKET, downloadBlob } from '@/lib/storage/server';
 import type { ProviderConfig } from '@/db/schema';
 
@@ -216,71 +218,151 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
     }
   }
 
-  // 7. Merge into leads row (idempotent — skip if already processed)
-  const mergedNew = mergeFields(badgeFields, transcriptFields);
-  await db.transaction(async (tx) => {
-    const [existing] = await tx
-      .select()
-      .from(leads)
-      .where(eq(leads.opportunityId, capture.opportunityId))
-      .limit(1);
-
-    let mergedFields: Record<string, unknown>;
-    let processedIds: string[];
-    if (!existing) {
-      mergedFields = mergedNew;
-      processedIds = [captureId];
-    } else {
-      if (existing.processedCaptureIds.includes(captureId)) {
-        return; // already merged
-      }
-      mergedFields = { ...existing.mergedFields, ...mergedNew };
-      processedIds = [...existing.processedCaptureIds, captureId];
-    }
-    const missingFields = computeMissingFields(mergedFields, requiredFields);
-
-    if (!existing) {
-      await tx.insert(leads).values({
-        opportunityId: capture.opportunityId,
-        mergedFields,
-        missingFields,
-        confidenceScores: {},
-        badgePhotoBlobKey: capture.photoBlobKey,
-        processedCaptureIds: processedIds,
-        lastUpdatedAt: new Date(),
+  // 7. Reconcile badge + transcript fields via LLM (with rule-based fallback inside reconcileFields)
+  let mergedNew: Record<string, unknown> = {};
+  let confidenceScores: Record<string, number> = {};
+  if (
+    extractionConfig &&
+    (Object.keys(badgeFields).length > 0 || Object.keys(transcriptFields).length > 0)
+  ) {
+    try {
+      const credential = await loadCredential(extractionConfig.credentialId, {
+        purpose: 'reconciliation',
+        contextId: captureId,
       });
-    } else {
-      await tx
-        .update(leads)
-        .set({
+      const reconciled = await reconcileFields({
+        badgeFields,
+        transcriptFields,
+        extractionConfig,
+        credentialApiKey: credential.apiKey,
+        captureId,
+      });
+      mergedNew = reconciled.mergedFields;
+      confidenceScores = reconciled.confidenceScores;
+    } catch (e) {
+      console.error('[processCapture] reconcile failed; basic merge:', (e as Error).message);
+      mergedNew = mergeFields(badgeFields, transcriptFields);
+    }
+  } else {
+    mergedNew = mergeFields(badgeFields, transcriptFields);
+  }
+
+  // 7a. Always record the extraction (separate from lead merge so dedupe re-pointing is clean)
+  await db.insert(captureExtractions).values({
+    captureId,
+    transcriptionProviderConfigId: transcriptionConfig?.id ?? null,
+    transcript: transcript || null,
+    extractedFields: transcriptFields,
+    badgeFields,
+    modelVersions: {
+      ...(transcriptionModelVersion && { transcription: transcriptionModelVersion }),
+      ...(visionModelVersion && { vision: visionModelVersion }),
+      ...(extractionModelVersion && { extraction: extractionModelVersion }),
+    },
+    latencyMs: {
+      ...(transcriptLatencyMs && { transcription: transcriptLatencyMs }),
+      ...(visionLatencyMs && { vision: visionLatencyMs }),
+      ...(extractionLatencyMs && { extraction: extractionLatencyMs }),
+    },
+    costEstimateUsd: transcriptCost?.toString() ?? null,
+  });
+
+  // 7b. AI dedupe — does this match an existing lead in the show?
+  let dedupeApplied = false;
+  if (extractionConfig && Object.keys(mergedNew).length > 0) {
+    try {
+      const credential = await loadCredential(extractionConfig.credentialId, {
+        purpose: 'dedupe',
+        contextId: captureId,
+      });
+      const dedupeResult = await findDuplicateLead({
+        newFields: mergedNew,
+        showId: show.id,
+        excludeOpportunityId: capture.opportunityId,
+        extractionConfig,
+        credentialApiKey: credential.apiKey,
+        captureId,
+      });
+      if (dedupeResult.matchedOpportunityId) {
+        console.log(
+          `[processCapture] dedupe → ${dedupeResult.matchedOpportunityId} (conf=${dedupeResult.confidence}): ${dedupeResult.reasoning}`,
+        );
+        await mergeIntoExistingOpportunity({
+          captureId,
+          fromOpportunityId: capture.opportunityId,
+          toOpportunityId: dedupeResult.matchedOpportunityId,
+          newFields: mergedNew,
+          newConfidence: confidenceScores,
+          photoBlobKey: capture.photoBlobKey,
+        });
+        dedupeApplied = true;
+      } else {
+        console.log(
+          `[processCapture] no dedupe (conf=${dedupeResult.confidence}, candidates=${dedupeResult.candidateCount}, ${dedupeResult.reasoning})`,
+        );
+      }
+    } catch (e) {
+      console.error('[processCapture] dedupe failed:', (e as Error).message);
+    }
+  }
+
+  // 7c. If not deduped, upsert the lead under this capture's opportunity
+  if (!dedupeApplied) {
+    await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(leads)
+        .where(eq(leads.opportunityId, capture.opportunityId))
+        .limit(1);
+
+      let mergedFields: Record<string, unknown>;
+      let combinedConfidence: Record<string, number>;
+      let processedIds: string[];
+      if (!existing) {
+        mergedFields = mergedNew;
+        combinedConfidence = confidenceScores;
+        processedIds = [captureId];
+      } else {
+        if (existing.processedCaptureIds.includes(captureId)) return;
+        mergedFields = { ...existing.mergedFields };
+        combinedConfidence = { ...existing.confidenceScores };
+        for (const [k, v] of Object.entries(mergedNew)) {
+          const oldConf = combinedConfidence[k] ?? 0;
+          const newConf = confidenceScores[k] ?? 0.5;
+          if (newConf > oldConf || mergedFields[k] == null) {
+            mergedFields[k] = v;
+            combinedConfidence[k] = newConf;
+          }
+        }
+        processedIds = [...existing.processedCaptureIds, captureId];
+      }
+      const missingFields = computeMissingFields(mergedFields, requiredFields);
+
+      if (!existing) {
+        await tx.insert(leads).values({
+          opportunityId: capture.opportunityId,
           mergedFields,
           missingFields,
-          badgePhotoBlobKey: existing.badgePhotoBlobKey ?? capture.photoBlobKey,
+          confidenceScores: combinedConfidence,
+          badgePhotoBlobKey: capture.photoBlobKey,
           processedCaptureIds: processedIds,
           lastUpdatedAt: new Date(),
-        })
-        .where(eq(leads.opportunityId, capture.opportunityId));
-    }
-
-    await tx.insert(captureExtractions).values({
-      captureId,
-      transcriptionProviderConfigId: transcriptionConfig?.id ?? null,
-      transcript: transcript || null,
-      extractedFields: transcriptFields,
-      badgeFields,
-      modelVersions: {
-        ...(transcriptionModelVersion && { transcription: transcriptionModelVersion }),
-        ...(visionModelVersion && { vision: visionModelVersion }),
-        ...(extractionModelVersion && { extraction: extractionModelVersion }),
-      },
-      latencyMs: {
-        ...(transcriptLatencyMs && { transcription: transcriptLatencyMs }),
-        ...(visionLatencyMs && { vision: visionLatencyMs }),
-        ...(extractionLatencyMs && { extraction: extractionLatencyMs }),
-      },
-      costEstimateUsd: transcriptCost?.toString() ?? null,
+        });
+      } else {
+        await tx
+          .update(leads)
+          .set({
+            mergedFields,
+            missingFields,
+            confidenceScores: combinedConfidence,
+            badgePhotoBlobKey: existing.badgePhotoBlobKey ?? capture.photoBlobKey,
+            processedCaptureIds: processedIds,
+            lastUpdatedAt: new Date(),
+          })
+          .where(eq(leads.opportunityId, capture.opportunityId));
+      }
     });
-  });
+  }
 
   // 7.5 Shadow A/B runs (don't affect mergedFields; produce extra extraction rows)
   if (capture.audioBlobKey && transcriptionConfig) {

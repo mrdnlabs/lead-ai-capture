@@ -7,7 +7,6 @@ type State = 'ready' | 'recording' | 'uploading' | 'done' | 'queued' | 'error';
 
 interface Props {
   showSlug: string;
-  opportunityCode: string;
   leadsUrl: string;
 }
 
@@ -25,7 +24,7 @@ function pickAudioMime(): string | undefined {
   return undefined;
 }
 
-export function CaptureRecorder({ showSlug, opportunityCode, leadsUrl }: Props) {
+export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
   const [state, setState] = useState<State>('ready');
   const [error, setError] = useState<string | null>(null);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
@@ -115,7 +114,8 @@ export function CaptureRecorder({ showSlug, opportunityCode, leadsUrl }: Props) 
 
     const queuedInput = {
       showSlug,
-      opportunityCode,
+      // Empty opportunityCode tells the server: auto-create a placeholder; AI dedupe later.
+      opportunityCode: '',
       clientCapturedAt: new Date().toISOString(),
       durationMs: durationMs > 0 ? durationMs : undefined,
       photoBlob: photoFile ?? undefined,

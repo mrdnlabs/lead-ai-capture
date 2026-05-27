@@ -4,7 +4,8 @@ import { getDexie, type OutboxItem } from '@/lib/db/dexie';
 
 export interface QueuedCaptureInput {
   showSlug: string;
-  opportunityCode: string;
+  /** Empty → server auto-creates an opportunity and AI dedupe re-points later. */
+  opportunityCode?: string;
   clientCapturedAt: string;
   durationMs?: number;
   photoBlob?: Blob;
@@ -35,7 +36,7 @@ export async function listQueued(): Promise<OutboxItem[]> {
 export async function uploadOne(item: OutboxItem): Promise<void> {
   const form = new FormData();
   form.set('showSlug', item.showSlug);
-  form.set('opportunityCode', item.opportunityCode);
+  if (item.opportunityCode) form.set('opportunityCode', item.opportunityCode);
   form.set('idempotencyKey', item.idempotencyKey);
   form.set('clientCapturedAt', item.clientCapturedAt);
   if (item.durationMs != null) form.set('durationMs', String(item.durationMs));

@@ -622,12 +622,16 @@ function ReadyBody({
           )}
         </div>
         <div
+          data-debug="photo-card-button-row"
           style={{
             display: 'flex',
             padding: 12,
             gap: 8,
             alignItems: 'stretch',
             flexShrink: 0,
+            border: '3px dashed magenta', // DEBUG — remove once we confirm rendering
+            background: '#fffbe6',         // DEBUG — pale yellow row bg
+            minHeight: 68,
           }}
         >
           <button
@@ -641,16 +645,17 @@ function ReadyBody({
               alignItems: 'center',
               justifyContent: 'center',
               borderRadius: 12,
-              border: '1px solid var(--rule-2)',
-              background: 'var(--surface)',
-              color: 'var(--ink-2)',
+              border: '2px solid var(--ink)', // DEBUG — high-contrast border
+              background: 'var(--paper-2)',    // DEBUG — gray fill for visibility
+              color: 'var(--ink)',
               cursor: 'pointer',
               font: 'inherit',
               padding: '0 12px',
+              fontWeight: 600,
             }}
           >
             <Camera size={18} />
-            <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 500 }}>Camera</span>
+            <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 600 }}>Camera</span>
           </button>
           <button
             type="button"
@@ -663,12 +668,13 @@ function ReadyBody({
               alignItems: 'center',
               justifyContent: 'center',
               borderRadius: 12,
-              border: '1px solid var(--rule-2)',
-              background: 'var(--surface)',
-              color: 'var(--ink-2)',
+              border: '2px solid var(--ink)', // DEBUG — high-contrast border
+              background: 'var(--paper-2)',    // DEBUG — gray fill for visibility
+              color: 'var(--ink)',
               cursor: 'pointer',
               font: 'inherit',
               padding: '0 12px',
+              fontWeight: 600,
             }}
           >
             <ImageIcon size={18} />

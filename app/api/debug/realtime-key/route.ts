@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/auth/currentRep';
 import { getShowMembership } from '@/lib/showAccess';
 import { resolveProviderForKind } from '@/lib/providers/resolve';
+import { tryFallbackProvider } from '@/lib/providers/fallback';
 
 /**
  * Admin-only diagnostic: tells us which API key the realtime path would use,
@@ -38,16 +39,29 @@ export async function GET(request: NextRequest): Promise<Response> {
       });
     }
     const key = resolved.credential.apiKey;
+    const fallback = tryFallbackProvider('realtime');
+    const fallbackInfo = fallback
+      ? {
+          available: true,
+          keyLength: fallback.credential.apiKey.length,
+          keyFirst4: fallback.credential.apiKey.slice(0, 4),
+          keyLast4: fallback.credential.apiKey.slice(-4),
+          matchesPrimary: fallback.credential.apiKey === key,
+        }
+      : { available: false };
     return NextResponse.json({
-      source: resolved.isFallback ? 'env_fallback (DEFAULT_GEMINI_API_KEY)' : 'db_credential',
-      provider: resolved.config.provider,
-      model: resolved.config.model,
-      configLabel: resolved.config.label,
-      keyLength: key.length,
-      keyFirst4: key.slice(0, 4),
-      keyLast4: key.slice(-4),
-      keyStartsWithAIza: key.startsWith('AIza'),
-      keyContainsWhitespace: /\s/.test(key),
+      primary: {
+        source: resolved.isFallback ? 'env_fallback (DEFAULT_GEMINI_API_KEY)' : 'db_credential',
+        provider: resolved.config.provider,
+        model: resolved.config.model,
+        configLabel: resolved.config.label,
+        keyLength: key.length,
+        keyFirst4: key.slice(0, 4),
+        keyLast4: key.slice(-4),
+        keyStartsWithAIza: key.startsWith('AIza'),
+        keyContainsWhitespace: /\s/.test(key),
+      },
+      fallback: fallbackInfo,
     });
   } catch (e) {
     return NextResponse.json(

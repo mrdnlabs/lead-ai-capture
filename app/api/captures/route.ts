@@ -51,7 +51,8 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   const parsed = metadataSchema.safeParse({
     showSlug: form.get('showSlug'),
-    opportunityCode: form.get('opportunityCode'),
+    // FormData returns null for missing fields — Zod `.optional()` doesn't accept null
+    opportunityCode: form.get('opportunityCode') ?? undefined,
     idempotencyKey: form.get('idempotencyKey'),
     clientCapturedAt: form.get('clientCapturedAt'),
     durationMs: form.get('durationMs') ?? undefined,

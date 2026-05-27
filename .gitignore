@@ -42,3 +42,6 @@ next-env.d.ts
 
 .vercel
 .env*
+
+# Test harness archives — local-only, often large, can be regenerated
+tests/scenario-runs/

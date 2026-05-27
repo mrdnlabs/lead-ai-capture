@@ -17,12 +17,30 @@ export interface OutboxItem {
   lastError?: string;
 }
 
+/** Raw WSS message log — written only when debug mode is enabled. */
+export interface DebugLogEntry {
+  id?: number;
+  at: number;
+  sessionId: string;
+  direction: 'send' | 'recv' | 'event';
+  /** Lightweight summary for quick scanning (e.g. "audio chunk", "set_lead_field"). */
+  kind: string;
+  /** JSON-stringified payload (audio chunks are summarized, not stored whole). */
+  payload: string;
+}
+
 class AiCaptureDb extends Dexie {
   outbox!: Table<OutboxItem, string>;
+  debugLog!: Table<DebugLogEntry, number>;
   constructor() {
     super('ai-capture');
     this.version(1).stores({
       outbox: 'id, queuedAt, opportunityCode',
+    });
+    // v2 adds the debugLog table — Dexie handles the migration on open.
+    this.version(2).stores({
+      outbox: 'id, queuedAt, opportunityCode',
+      debugLog: '++id, at, sessionId, direction',
     });
   }
 }

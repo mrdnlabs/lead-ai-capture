@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { logDebug } from '@/lib/debug/log';
 
 export type RealtimeStatus = 'idle' | 'connecting' | 'live' | 'closing' | 'closed' | 'error';
 
@@ -99,6 +100,18 @@ interface RealtimeContext {
   responseAudioBuffer: Int16Array[];
   responseSampleRate: number;
   playbackStartTime: number;
+  /** Per-session ID — groups debug log entries for a single conversation. */
+  sessionId: string;
+}
+
+/** Send a JSON message and tee a (summarized) copy into the debug log. */
+function wsSendLogged(
+  ctx: Pick<RealtimeContext, 'ws' | 'sessionId'>,
+  kind: string,
+  payload: unknown,
+): void {
+  ctx.ws.send(JSON.stringify(payload));
+  logDebug(ctx.sessionId, 'send', kind, payload);
 }
 
 export function useRealtimeAssist() {
@@ -121,6 +134,7 @@ export function useRealtimeAssist() {
     const ctx = ctxRef.current;
     if (!ctx) return;
     setStatus('closing');
+    logDebug(ctx.sessionId, 'event', 'session_stop', { reason: 'client-stop' });
     try {
       ctx.processor?.disconnect();
       ctx.source?.disconnect();
@@ -171,13 +185,11 @@ export function useRealtimeAssist() {
         .filter(([, v]) => v)
         .map(([k, v]) => `  - ${k}: ${v}`)
         .join('\n');
-      ctx.ws.send(
-        JSON.stringify({
-          realtimeInput: {
-            text: `[system] You just flagged this as a match for opportunity ${opportunityCode}. We already have these fields on file — do NOT re-ask the rep for them:\n${lines}\n\nFocus on NEW info (interest level, next steps, updated title) or any corrections the rep mentions.`,
-          },
-        }),
-      );
+      wsSendLogged(ctx, 'system_prefill_note', {
+        realtimeInput: {
+          text: `[system] You just flagged this as a match for opportunity ${opportunityCode}. We already have these fields on file — do NOT re-ask the rep for them:\n${lines}\n\nFocus on NEW info (interest level, next steps, updated title) or any corrections the rep mentions.`,
+        },
+      });
     }
   }, []);
 
@@ -185,19 +197,33 @@ export function useRealtimeAssist() {
    * Roll back the prefill for an opportunity — removes only the keys that
    * came from this opportunity's prefill AND haven't been overwritten by a
    * live capture since (source !== 'prefill' means rep + AI confirmed it).
+   *
+   * Also pushes a [system] note to the live AI telling it to exclude this
+   * opportunity from future match suggestions, so it can flag a different
+   * candidate from the EXISTING LEADS list (or proceed as a new lead).
    */
   const rollbackExistingLeadPrefill = useCallback((opportunityCode: string) => {
     const keys = prefillOriginRef.current.get(opportunityCode);
-    if (!keys || keys.size === 0) return;
-    setLiveFields((cur) => {
-      const next = { ...cur };
-      for (const k of keys) {
-        const entry = next[k];
-        if (entry && entry.source === 'prefill') delete next[k];
-      }
-      return next;
-    });
-    prefillOriginRef.current.delete(opportunityCode);
+    if (keys && keys.size > 0) {
+      setLiveFields((cur) => {
+        const next = { ...cur };
+        for (const k of keys) {
+          const entry = next[k];
+          if (entry && entry.source === 'prefill') delete next[k];
+        }
+        return next;
+      });
+      prefillOriginRef.current.delete(opportunityCode);
+    }
+
+    const ctx = ctxRef.current;
+    if (ctx?.ws.readyState === WebSocket.OPEN) {
+      wsSendLogged(ctx, 'system_rejection_note', {
+        realtimeInput: {
+          text: `[system] The rep rejected your match suggestion for opportunity ${opportunityCode} — that is NOT the right lead. Do not suggest it again. Re-check the EXISTING LEADS list for a better match based on what the rep has actually said. If nothing else fits, proceed as a brand-new lead and just help capture their info.`,
+        },
+      });
+    }
   }, []);
 
   /**
@@ -213,7 +239,7 @@ export function useRealtimeAssist() {
     if (!trimmed) return false;
     const ctx = ctxRef.current;
     if (!ctx || ctx.ws.readyState !== WebSocket.OPEN) return false;
-    ctx.ws.send(JSON.stringify({ realtimeInput: { text: trimmed } }));
+    wsSendLogged(ctx, 'user_text', { realtimeInput: { text: trimmed } });
     setTranscript((cur) => [...cur, { role: 'user', text: trimmed, at: Date.now() }]);
     return true;
   }, []);
@@ -235,21 +261,17 @@ export function useRealtimeAssist() {
     const bytes = new Uint8Array(buf);
     for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
     const data = btoa(binary);
-    ctx.ws.send(
-      JSON.stringify({
-        realtimeInput: {
-          video: { data, mimeType: blob.type || 'image/jpeg' },
-        },
-      }),
-    );
+    wsSendLogged(ctx, 'photo_attach', {
+      realtimeInput: {
+        video: { data, mimeType: blob.type || 'image/jpeg' },
+      },
+    });
     // Hint to the model: "the rep just attached a photo — look at it"
-    ctx.ws.send(
-      JSON.stringify({
-        realtimeInput: {
-          text: 'The rep just attached a photo — likely the lead\'s name badge or a business card. Take a look and acknowledge or extract what you see.',
-        },
-      }),
-    );
+    wsSendLogged(ctx, 'photo_attach_hint', {
+      realtimeInput: {
+        text: 'The rep just attached a photo — likely the lead\'s name badge or a business card. Take a look and acknowledge or extract what you see.',
+      },
+    });
     return true;
   }, []);
 
@@ -321,6 +343,10 @@ export function useRealtimeAssist() {
       ws.binaryType = 'arraybuffer';
 
       const responseAudioBuffer: Int16Array[] = [];
+      const sessionId =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const ctx: RealtimeContext = {
         audioCtx,
         ws,
@@ -330,26 +356,36 @@ export function useRealtimeAssist() {
         responseAudioBuffer,
         responseSampleRate: 24000, // Gemini Live output sample rate
         playbackStartTime: 0,
+        sessionId,
       };
       ctxRef.current = ctx;
+      logDebug(sessionId, 'event', 'session_start', {
+        showSlug: args.showSlug,
+        provider: tokenData.provider,
+        model: tokenData.model,
+        endpoint: tokenData.endpoint,
+      });
 
       ws.onopen = () => {
         if (tokenData.setupMessage) {
-          ws.send(JSON.stringify(tokenData.setupMessage));
+          wsSendLogged(ctx, 'setup', tokenData.setupMessage);
         }
         setStatus('live');
         startMicStreaming(ctx, source, audioCtx, ws);
+        logDebug(sessionId, 'event', 'ws_open', { readyState: ws.readyState });
       };
 
       ws.onerror = (e) => {
         console.error('[realtime] ws error', e);
         setError('WebSocket error');
         setStatus('error');
+        logDebug(sessionId, 'event', 'ws_error', { type: (e as Event).type });
       };
 
       ws.onclose = (e) => {
         if (status !== 'error') setStatus('closed');
         console.log('[realtime] ws closed', e.code, e.reason);
+        logDebug(sessionId, 'event', 'ws_close', { code: e.code, reason: e.reason });
       };
 
       ws.onmessage = (e) =>
@@ -433,6 +469,9 @@ function startMicStreaming(
   const bufferSize = 4096;
   const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
   ctx.processor = processor;
+  // Sample mic chunks into the debug log so they're visible but don't blow up
+  // storage: log every Nth chunk with a size summary, not the audio bytes.
+  let micChunkCount = 0;
   processor.onaudioprocess = (event) => {
     if (ws.readyState !== WebSocket.OPEN) return;
     const input = event.inputBuffer.getChannelData(0);
@@ -448,6 +487,14 @@ function startMicStreaming(
         },
       }),
     );
+    micChunkCount++;
+    if (micChunkCount % 20 === 1) {
+      logDebug(ctx.sessionId, 'send', 'mic_audio_chunk', {
+        chunkIndex: micChunkCount,
+        approxBytes: b64.length,
+        sample: 'every-20th-chunk-logged',
+      });
+    }
   };
   source.connect(processor);
   // ScriptProcessorNode needs a sink to actually process
@@ -506,6 +553,17 @@ function handleServerMessage(
   } catch {
     return;
   }
+
+  // Classify the message so the debug log has a useful "kind" column.
+  let kind = 'unknown';
+  if (msg.setupComplete) kind = 'setupComplete';
+  else if (msg.toolCall) kind = 'toolCall';
+  else if (msg.serverContent?.modelTurn) kind = 'modelTurn';
+  else if (msg.serverContent?.inputTranscription) kind = 'inputTranscription';
+  else if (msg.serverContent?.outputTranscription) kind = 'outputTranscription';
+  else if (msg.serverContent?.turnComplete) kind = 'turnComplete';
+  else if (msg.serverContent?.interrupted) kind = 'interrupted';
+  logDebug(ctx.sessionId, 'recv', kind, msg);
 
   // Gemini Live nests inputTranscription/outputTranscription under serverContent
   if (msg.serverContent?.inputTranscription?.text) {
@@ -590,9 +648,9 @@ function handleServerMessage(
       }
     }
     if (ctx.ws.readyState === WebSocket.OPEN) {
-      ctx.ws.send(
-        JSON.stringify({ toolResponse: { functionResponses: responses } }),
-      );
+      wsSendLogged(ctx, 'tool_response', {
+        toolResponse: { functionResponses: responses },
+      });
     }
   }
 }

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { drainQueue, enqueueCapture, uploadOne } from '@/lib/offline/queue';
 import { useRealtimeAssist } from '@/lib/realtime/useRealtimeAssist';
+import { isDebugEnabled, setDebugEnabled } from '@/lib/debug/log';
 
 type State = 'ready' | 'recording' | 'uploading' | 'done' | 'queued' | 'error';
 
@@ -42,6 +43,12 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
   // Dev toggle — when true, treat the app as offline (force submit through
   // the Dexie queue path even if the browser is actually online).
   const [simulatedOffline, setSimulatedOffline] = useState(false);
+  // Mirrors localStorage 'aicapture.debug' — turning it on archives every
+  // WSS send/receive to Dexie so you can inspect what the AI saw and said.
+  const [debugMode, setDebugMode] = useState(false);
+  useEffect(() => {
+    setDebugMode(isDebugEnabled());
+  }, []);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -122,6 +129,35 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
 
   function stopRecording() {
     recorderRef.current?.stop();
+  }
+
+  function discardRecording() {
+    if (!window.confirm('Discard this recording? Audio, transcript, and any captured fields will be lost.')) {
+      return;
+    }
+    const rec = recorderRef.current;
+    // Mark chunks empty so any pending onstop produces a 0-byte blob we then
+    // throw away below. This avoids a race where rec.stop() triggers onstop
+    // mid-discard and re-sets audioBlob to a partial recording.
+    chunksRef.current = [];
+    if (rec && rec.state !== 'inactive') {
+      try {
+        rec.stop();
+      } catch {
+        /* already stopping */
+      }
+    }
+    if (tickerRef.current) clearInterval(tickerRef.current);
+    realtime.stop();
+    setAudioBlob(null);
+    if (audioPreviewUrl) URL.revokeObjectURL(audioPreviewUrl);
+    setAudioPreviewUrl(null);
+    setDurationMs(0);
+    setElapsed(0);
+    setTextDraft('');
+    setConfirmedExistingLeadCode(null);
+    setError(null);
+    setState('ready');
   }
 
   // Stop the recorder and resolve with the freshly-built blob. The existing
@@ -311,15 +347,24 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
         {audioPreviewUrl ? (
           <audio controls src={audioPreviewUrl} className="mt-3 w-full" />
         ) : null}
-        <div className="mt-3">
+        <div className="mt-3 space-y-2">
           {state === 'recording' ? (
-            <button
-              type="button"
-              onClick={stopRecording}
-              className="w-full rounded-md bg-red-600 px-3 py-3 text-sm font-medium text-white"
-            >
-              Stop recording
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={stopRecording}
+                className="w-full rounded-md bg-red-600 px-3 py-3 text-sm font-medium text-white"
+              >
+                Stop recording
+              </button>
+              <button
+                type="button"
+                onClick={discardRecording}
+                className="w-full rounded-md border border-neutral-300 px-3 py-2 text-xs font-medium text-neutral-600"
+              >
+                Discard recording
+              </button>
+            </>
           ) : (
             <button
               type="button"
@@ -442,6 +487,31 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
             {simulatedOffline ? (
               <span className="ml-1 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-medium text-orange-800">
                 OFFLINE MODE
+              </span>
+            ) : null}
+          </span>
+        </label>
+
+        {/* Dev toggle — archive every WSS message to Dexie for inspection. */}
+        <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-neutral-600">
+          <input
+            type="checkbox"
+            checked={debugMode}
+            onChange={(e) => {
+              setDebugEnabled(e.target.checked);
+              setDebugMode(e.target.checked);
+            }}
+            className="mt-0.5 rounded border-neutral-300"
+          />
+          <span>
+            <span className="font-medium text-neutral-900">Debug mode</span> — archive raw
+            AI traffic locally.{' '}
+            <a href="/debug/log" className="underline">
+              view log
+            </a>
+            {debugMode ? (
+              <span className="ml-1 rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-800">
+                LOGGING
               </span>
             ) : null}
           </span>

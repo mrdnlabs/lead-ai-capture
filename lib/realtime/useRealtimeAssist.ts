@@ -20,6 +20,12 @@ export interface LiveFieldValue {
   value: string;
   confidence?: number;
   at: number;
+  /**
+   * 'prefill' = filled from an existing lead's known fields when the AI flagged
+   *   a match. Lower trust — rolled back if the rep rejects the match.
+   * 'live'    = captured this session via set_lead_field. Treated as ground truth.
+   */
+  source?: 'prefill' | 'live';
 }
 
 export type LiveFields = Record<string, LiveFieldValue>;
@@ -103,8 +109,11 @@ export function useRealtimeAssist() {
   const [liveFields, setLiveFields] = useState<LiveFields>({});
   const [existingLeadMatches, setExistingLeadMatches] = useState<ExistingLeadMatch[]>([]);
   // Recent-lead snapshot from the token endpoint — keyed by opportunityCode so
-  // we can prefill the checklist instantly when the rep confirms a match.
+  // we can prefill the checklist instantly when the AI flags a match.
   const existingLeadsRef = useRef<Map<string, Record<string, string>>>(new Map());
+  // Tracks which liveField keys were prefilled from which opportunity — used to
+  // roll back precisely if the rep taps "No, different person".
+  const prefillOriginRef = useRef<Map<string, Set<string>>>(new Map());
   const ctxRef = useRef<RealtimeContext | null>(null);
   const startedRef = useRef(false);
 
@@ -126,17 +135,19 @@ export function useRealtimeAssist() {
   }, []);
 
   /**
-   * Called when the rep confirms "Yes, expand this lead" on a match banner.
-   * Prefills the checklist with whatever we already know about that lead, and
-   * nudges the AI mid-session so it stops re-asking for those fields.
+   * Fired when the AI calls match_existing_lead. Prefills the checklist with
+   * whatever's on file for that lead AND tells the AI to stop re-asking those
+   * fields. This is optimistic — the rep can still reject via the banner, in
+   * which case we roll back to restore the prior checklist state.
    *
-   * The prefill uses confidence 0.85 — high enough to render as a captured
-   * checkmark, but low enough that anything the AI verifies live (≥0.9) wins.
+   * Prefill confidence is 0.85: high enough to render as a green checkmark,
+   * low enough that any in-session voice-verified value (≥0.9) wins.
    */
-  const confirmExistingLeadMatch = useCallback((opportunityCode: string) => {
+  const applyExistingLeadPrefill = useCallback((opportunityCode: string) => {
     const known = existingLeadsRef.current.get(opportunityCode);
     if (!known || Object.keys(known).length === 0) return;
 
+    const appliedKeys = new Set<string>();
     setLiveFields((cur) => {
       const next = { ...cur };
       const now = Date.now();
@@ -145,10 +156,14 @@ export function useRealtimeAssist() {
         const existing = cur[k];
         // Don't overwrite a higher-confidence value the rep already verified.
         if (existing && (existing.confidence ?? 0) >= 0.85) continue;
-        next[k] = { value: v, confidence: 0.85, at: now };
+        next[k] = { value: v, confidence: 0.85, at: now, source: 'prefill' };
+        appliedKeys.add(k);
       }
       return next;
     });
+    if (appliedKeys.size > 0) {
+      prefillOriginRef.current.set(opportunityCode, appliedKeys);
+    }
 
     const ctx = ctxRef.current;
     if (ctx?.ws.readyState === WebSocket.OPEN) {
@@ -159,11 +174,48 @@ export function useRealtimeAssist() {
       ctx.ws.send(
         JSON.stringify({
           realtimeInput: {
-            text: `[system] The rep just confirmed this is the same person as opportunity ${opportunityCode}. We already have these fields on file — do NOT re-ask the rep for them:\n${lines}\n\nFocus on NEW info (interest level, next steps, updated title) or any corrections the rep mentions.`,
+            text: `[system] You just flagged this as a match for opportunity ${opportunityCode}. We already have these fields on file — do NOT re-ask the rep for them:\n${lines}\n\nFocus on NEW info (interest level, next steps, updated title) or any corrections the rep mentions.`,
           },
         }),
       );
     }
+  }, []);
+
+  /**
+   * Roll back the prefill for an opportunity — removes only the keys that
+   * came from this opportunity's prefill AND haven't been overwritten by a
+   * live capture since (source !== 'prefill' means rep + AI confirmed it).
+   */
+  const rollbackExistingLeadPrefill = useCallback((opportunityCode: string) => {
+    const keys = prefillOriginRef.current.get(opportunityCode);
+    if (!keys || keys.size === 0) return;
+    setLiveFields((cur) => {
+      const next = { ...cur };
+      for (const k of keys) {
+        const entry = next[k];
+        if (entry && entry.source === 'prefill') delete next[k];
+      }
+      return next;
+    });
+    prefillOriginRef.current.delete(opportunityCode);
+  }, []);
+
+  /**
+   * Send a typed message into the live conversation. Same wire format as
+   * voice, just text — the AI will reply in voice (and the response shows
+   * up in the transcript bubble like everything else).
+   *
+   * We also echo the typed text into the local transcript as a "user" turn
+   * so the rep sees what they sent and post-processing has it.
+   */
+  const sendText = useCallback((text: string): boolean => {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const ctx = ctxRef.current;
+    if (!ctx || ctx.ws.readyState !== WebSocket.OPEN) return false;
+    ctx.ws.send(JSON.stringify({ realtimeInput: { text: trimmed } }));
+    setTranscript((cur) => [...cur, { role: 'user', text: trimmed, at: Date.now() }]);
+    return true;
   }, []);
 
   /**
@@ -334,6 +386,8 @@ export function useRealtimeAssist() {
               if (cur.some((f) => f.opportunityCode === opportunityCode)) return cur;
               return [...cur, { opportunityCode, reason, at: Date.now() }];
             });
+            // Optimistically prefill — rep can roll back via the banner.
+            applyExistingLeadPrefill(opportunityCode);
           },
         );
 
@@ -344,7 +398,7 @@ export function useRealtimeAssist() {
         }, args.maxDurationSec * 1000);
       }
     },
-    [status, stop],
+    [status, stop, applyExistingLeadPrefill],
   );
 
   return {
@@ -354,9 +408,9 @@ export function useRealtimeAssist() {
     requiredFields,
     liveFields,
     existingLeadMatches,
-    /** Prefill the checklist from a confirmed match + tell the AI to skip those fields. */
-    confirmExistingLeadMatch,
-    /** Dismiss a match the rep rejected (so the banner goes away). */
+    /** Roll back the optimistic prefill (rep rejected the AI's match). */
+    rollbackExistingLeadPrefill,
+    /** Dismiss a match (so the banner goes away). */
     dismissExistingLeadMatch: (opportunityCode: string) =>
       setExistingLeadMatches((cur) =>
         cur.filter((f) => f.opportunityCode !== opportunityCode),
@@ -364,6 +418,7 @@ export function useRealtimeAssist() {
     start,
     stop,
     sendImage,
+    sendText,
   };
 }
 

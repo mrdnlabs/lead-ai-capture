@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { enqueueCapture, uploadOne } from '@/lib/offline/queue';
+import { drainQueue, enqueueCapture, uploadOne } from '@/lib/offline/queue';
 import { useRealtimeAssist } from '@/lib/realtime/useRealtimeAssist';
 
 type State = 'ready' | 'recording' | 'uploading' | 'done' | 'queued' | 'error';
@@ -38,6 +38,10 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
   // Set when the rep confirms an AI returning-lead match — this capture will
   // attach to the existing opportunity instead of creating a new one.
   const [confirmedExistingLeadCode, setConfirmedExistingLeadCode] = useState<string | null>(null);
+  const [textDraft, setTextDraft] = useState('');
+  // Dev toggle — when true, treat the app as offline (force submit through
+  // the Dexie queue path even if the browser is actually online).
+  const [simulatedOffline, setSimulatedOffline] = useState(false);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -60,6 +64,14 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     const el = transcriptScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [realtime.transcript, realtime.liveFields]);
+
+  // When the simulated-offline toggle flips back to online, drain anything that
+  // queued up while it was on. Mirrors the real online-event auto-drain.
+  useEffect(() => {
+    if (!simulatedOffline) {
+      void drainQueue().catch(() => {});
+    }
+  }, [simulatedOffline]);
 
   async function startRecording() {
     setError(null);
@@ -193,8 +205,11 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
         Object.keys(realtime.liveFields).length > 0 ? realtime.liveFields : undefined,
     };
 
-    // If clearly offline, skip the doomed network call and enqueue immediately.
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    // If offline (real or simulated), skip the doomed network call and enqueue.
+    const isOffline =
+      simulatedOffline ||
+      (typeof navigator !== 'undefined' && navigator.onLine === false);
+    if (isOffline) {
       try {
         await enqueueCapture(queuedInput);
         setState('queued');
@@ -248,7 +263,9 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
           }
         >
           {state === 'queued'
-            ? 'Saved locally. Will upload when you’re back online.'
+            ? simulatedOffline
+              ? 'Saved to local queue (simulated offline). Toggle off and the auto-drain will upload it.'
+              : 'Saved locally. Will upload when you’re back online.'
             : 'Capture uploaded.'}
         </div>
         <div className="flex gap-2">
@@ -272,36 +289,7 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* Photo block */}
-      <section className="rounded-lg border border-neutral-200 p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm font-medium">Badge photo</div>
-            <div className="text-xs text-neutral-500">Tap to use camera</div>
-          </div>
-          {photoFile ? (
-            <button type="button" onClick={clearPhoto} className="text-xs text-neutral-500 underline">
-              clear
-            </button>
-          ) : null}
-        </div>
-        {photoPreviewUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={photoPreviewUrl} alt="badge" className="mt-3 max-h-48 rounded-md object-contain" />
-        ) : null}
-        <label className="mt-3 block">
-          <span className="sr-only">Choose photo</span>
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={onPhotoSelected}
-            className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-neutral-900 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white"
-          />
-        </label>
-      </section>
-
-      {/* Audio block */}
+      {/* Capture block — voice + attachments + AI assist all live here */}
       <section className="rounded-lg border border-neutral-200 p-4">
         <div className="flex items-center justify-between">
           <div>
@@ -344,6 +332,83 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
           )}
         </div>
 
+        {/* Attachment toolbar — photo + text input. Photo always available;
+            text only sends to AI when a live session is active. */}
+        <div className="mt-3 space-y-2">
+          {photoPreviewUrl ? (
+            <div className="flex items-center gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={photoPreviewUrl}
+                alt="attached"
+                className="h-12 w-12 rounded object-cover"
+              />
+              <div className="flex-1 text-xs text-neutral-600">
+                Photo attached
+                {realtime.status === 'live' ? (
+                  <span className="ml-1 text-emerald-700">· sent to AI</span>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={clearPhoto}
+                className="text-xs text-neutral-500 underline"
+              >
+                remove
+              </button>
+            </div>
+          ) : null}
+          <div className="flex items-stretch gap-2">
+            <label
+              className="flex cursor-pointer items-center justify-center rounded-md border border-neutral-300 bg-white px-3 text-sm hover:bg-neutral-50"
+              title="Attach photo (camera or library)"
+            >
+              <span aria-hidden>📎</span>
+              <span className="sr-only">Attach photo</span>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={onPhotoSelected}
+                className="hidden"
+              />
+            </label>
+            <input
+              type="text"
+              value={textDraft}
+              onChange={(e) => setTextDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (realtime.status === 'live' && textDraft.trim()) {
+                    realtime.sendText(textDraft);
+                    setTextDraft('');
+                  }
+                }
+              }}
+              placeholder={
+                realtime.status === 'live'
+                  ? 'Type a note to the AI (or just talk)…'
+                  : 'Enable AI assist to chat by text'
+              }
+              disabled={realtime.status !== 'live'}
+              className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm disabled:bg-neutral-50 disabled:text-neutral-400"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                if (realtime.status === 'live' && textDraft.trim()) {
+                  realtime.sendText(textDraft);
+                  setTextDraft('');
+                }
+              }}
+              disabled={realtime.status !== 'live' || !textDraft.trim()}
+              className="rounded-md bg-neutral-900 px-3 text-sm font-medium text-white disabled:opacity-30"
+            >
+              Send
+            </button>
+          </div>
+        </div>
+
         {/* AI assist toggle */}
         <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-neutral-600">
           <input
@@ -360,6 +425,25 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
             <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
               direct API key auth
             </span>
+          </span>
+        </label>
+
+        {/* Dev toggle — simulate offline mode for testing the Dexie queue. */}
+        <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-neutral-600">
+          <input
+            type="checkbox"
+            checked={simulatedOffline}
+            onChange={(e) => setSimulatedOffline(e.target.checked)}
+            className="mt-0.5 rounded border-neutral-300"
+          />
+          <span>
+            <span className="font-medium text-neutral-900">Simulate offline</span> — submit goes
+            to the local queue instead of the network. Useful for testing the offline outbox.
+            {simulatedOffline ? (
+              <span className="ml-1 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-medium text-orange-800">
+                OFFLINE MODE
+              </span>
+            ) : null}
           </span>
         </label>
 
@@ -388,17 +472,17 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
                     <div className="mt-2 flex gap-2">
                       <button
                         type="button"
-                        onClick={() => {
-                          setConfirmedExistingLeadCode(match.opportunityCode);
-                          realtime.confirmExistingLeadMatch(match.opportunityCode);
-                        }}
+                        onClick={() => setConfirmedExistingLeadCode(match.opportunityCode)}
                         className="rounded-md bg-emerald-600 px-2 py-1 text-xs font-medium text-white"
                       >
-                        Yes, expand this lead
+                        Yes, that's them
                       </button>
                       <button
                         type="button"
-                        onClick={() => realtime.dismissExistingLeadMatch(match.opportunityCode)}
+                        onClick={() => {
+                          realtime.rollbackExistingLeadPrefill(match.opportunityCode);
+                          realtime.dismissExistingLeadMatch(match.opportunityCode);
+                        }}
                         className="rounded-md border border-neutral-300 bg-white px-2 py-1 text-xs font-medium text-neutral-700"
                       >
                         No, different person
@@ -409,6 +493,7 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
                       type="button"
                       onClick={() => {
                         setConfirmedExistingLeadCode(null);
+                        realtime.rollbackExistingLeadPrefill(match.opportunityCode);
                         realtime.dismissExistingLeadMatch(match.opportunityCode);
                       }}
                       className="mt-2 text-xs text-neutral-500 underline"

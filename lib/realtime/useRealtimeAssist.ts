@@ -42,6 +42,8 @@ interface TokenResponse {
   setupMessage?: unknown;
   /** Fields the AI is expected to collect (drives the checklist UI). */
   requiredFields?: RequiredField[];
+  /** Known fields per recent lead — used to prefill the checklist on match-confirm. */
+  existingLeads?: Array<{ opportunityCode: string; knownFields: Record<string, string> }>;
 }
 
 interface StartArgs {
@@ -100,6 +102,9 @@ export function useRealtimeAssist() {
   const [requiredFields, setRequiredFields] = useState<RequiredField[]>([]);
   const [liveFields, setLiveFields] = useState<LiveFields>({});
   const [existingLeadMatches, setExistingLeadMatches] = useState<ExistingLeadMatch[]>([]);
+  // Recent-lead snapshot from the token endpoint — keyed by opportunityCode so
+  // we can prefill the checklist instantly when the rep confirms a match.
+  const existingLeadsRef = useRef<Map<string, Record<string, string>>>(new Map());
   const ctxRef = useRef<RealtimeContext | null>(null);
   const startedRef = useRef(false);
 
@@ -118,6 +123,47 @@ export function useRealtimeAssist() {
     ctxRef.current = null;
     startedRef.current = false;
     setStatus('closed');
+  }, []);
+
+  /**
+   * Called when the rep confirms "Yes, expand this lead" on a match banner.
+   * Prefills the checklist with whatever we already know about that lead, and
+   * nudges the AI mid-session so it stops re-asking for those fields.
+   *
+   * The prefill uses confidence 0.85 — high enough to render as a captured
+   * checkmark, but low enough that anything the AI verifies live (≥0.9) wins.
+   */
+  const confirmExistingLeadMatch = useCallback((opportunityCode: string) => {
+    const known = existingLeadsRef.current.get(opportunityCode);
+    if (!known || Object.keys(known).length === 0) return;
+
+    setLiveFields((cur) => {
+      const next = { ...cur };
+      const now = Date.now();
+      for (const [k, v] of Object.entries(known)) {
+        if (!v) continue;
+        const existing = cur[k];
+        // Don't overwrite a higher-confidence value the rep already verified.
+        if (existing && (existing.confidence ?? 0) >= 0.85) continue;
+        next[k] = { value: v, confidence: 0.85, at: now };
+      }
+      return next;
+    });
+
+    const ctx = ctxRef.current;
+    if (ctx?.ws.readyState === WebSocket.OPEN) {
+      const lines = Object.entries(known)
+        .filter(([, v]) => v)
+        .map(([k, v]) => `  - ${k}: ${v}`)
+        .join('\n');
+      ctx.ws.send(
+        JSON.stringify({
+          realtimeInput: {
+            text: `[system] The rep just confirmed this is the same person as opportunity ${opportunityCode}. We already have these fields on file — do NOT re-ask the rep for them:\n${lines}\n\nFocus on NEW info (interest level, next steps, updated title) or any corrections the rep mentions.`,
+          },
+        }),
+      );
+    }
   }, []);
 
   /**
@@ -189,6 +235,11 @@ export function useRealtimeAssist() {
       }
       const tokenData = (await tokenRes.json()) as TokenResponse;
       if (tokenData.requiredFields) setRequiredFields(tokenData.requiredFields);
+      if (tokenData.existingLeads) {
+        existingLeadsRef.current = new Map(
+          tokenData.existingLeads.map((l) => [l.opportunityCode, l.knownFields]),
+        );
+      }
 
       // 2. Set up audio plumbing
       const audioCtx = new (window.AudioContext ||
@@ -303,6 +354,8 @@ export function useRealtimeAssist() {
     requiredFields,
     liveFields,
     existingLeadMatches,
+    /** Prefill the checklist from a confirmed match + tell the AI to skip those fields. */
+    confirmExistingLeadMatch,
     /** Dismiss a match the rep rejected (so the banner goes away). */
     dismissExistingLeadMatch: (opportunityCode: string) =>
       setExistingLeadMatches((cur) =>

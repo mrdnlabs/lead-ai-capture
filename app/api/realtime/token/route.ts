@@ -61,6 +61,8 @@ interface RecentLeadSummary {
   name?: string;
   company?: string;
   title?: string;
+  /** Full known fields — sent to the client so the checklist can prefill on match-confirm. */
+  knownFields: Record<string, string>;
 }
 
 async function loadRecentLeads(showId: string, limit = 30): Promise<RecentLeadSummary[]> {
@@ -76,7 +78,12 @@ async function loadRecentLeads(showId: string, limit = 30): Promise<RecentLeadSu
     .limit(limit);
   return rows.map((r) => {
     const fields = r.mergedFields as Record<string, unknown>;
-    const out: RecentLeadSummary = { opportunityCode: r.opportunityCode };
+    const knownFields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(fields)) {
+      if (v == null || v === '') continue;
+      knownFields[k] = typeof v === 'string' ? v : JSON.stringify(v);
+    }
+    const out: RecentLeadSummary = { opportunityCode: r.opportunityCode, knownFields };
     if (typeof fields.name === 'string') out.name = fields.name;
     if (typeof fields.company === 'string') out.company = fields.company;
     if (typeof fields.title === 'string') out.title = fields.title;
@@ -287,6 +294,10 @@ export async function POST(request: NextRequest) {
         key: f.key,
         label: f.label,
         required: f.required,
+      })),
+      existingLeads: recentLeads.map((l) => ({
+        opportunityCode: l.opportunityCode,
+        knownFields: l.knownFields,
       })),
     });
   } catch (e) {

@@ -388,7 +388,10 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
                     <div className="mt-2 flex gap-2">
                       <button
                         type="button"
-                        onClick={() => setConfirmedExistingLeadCode(match.opportunityCode)}
+                        onClick={() => {
+                          setConfirmedExistingLeadCode(match.opportunityCode);
+                          realtime.confirmExistingLeadMatch(match.opportunityCode);
+                        }}
                         className="rounded-md bg-emerald-600 px-2 py-1 text-xs font-medium text-white"
                       >
                         Yes, expand this lead

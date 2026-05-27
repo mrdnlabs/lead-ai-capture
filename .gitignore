@@ -45,3 +45,7 @@ next-env.d.ts
 
 # Test harness archives — local-only, often large, can be regenerated
 tests/scenario-runs/
+
+# Bundles built for design review
+design-bundle/
+design-bundle*.zip

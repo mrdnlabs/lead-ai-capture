@@ -82,6 +82,8 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
   const startTimeRef = useRef<number>(0);
   const tickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const libraryInputRef = useRef<HTMLInputElement | null>(null);
   const realtime = useRealtimeAssist();
 
   useEffect(() => {
@@ -393,6 +395,8 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
             onClearTarget={() => setTargetLead(null)}
             photoPreviewUrl={photoPreviewUrl}
             onPhotoSelected={onPhotoSelected}
+            cameraInputRef={cameraInputRef}
+            libraryInputRef={libraryInputRef}
             aiAssistEnabled={aiAssistEnabled}
             setAiAssistEnabled={setAiAssistEnabled}
             onPickLead={() => setActiveSheet('pick')}
@@ -522,6 +526,8 @@ function ReadyBody({
   onClearTarget,
   photoPreviewUrl,
   onPhotoSelected,
+  cameraInputRef,
+  libraryInputRef,
   aiAssistEnabled,
   setAiAssistEnabled,
   onPickLead,
@@ -532,6 +538,8 @@ function ReadyBody({
   onClearTarget: () => void;
   photoPreviewUrl: string | null;
   onPhotoSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  cameraInputRef: React.RefObject<HTMLInputElement | null>;
+  libraryInputRef: React.RefObject<HTMLInputElement | null>;
   aiAssistEnabled: boolean;
   setAiAssistEnabled: (v: boolean) => void;
   onPickLead: () => void;
@@ -567,6 +575,26 @@ function ReadyBody({
         </div>
       ) : null}
 
+      {/* Hidden file inputs — sit outside the card so they don't interfere
+          with the row's flex layout. Buttons trigger them via ref.click(). */}
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={onPhotoSelected}
+        className="hidden"
+        aria-hidden
+      />
+      <input
+        ref={libraryInputRef}
+        type="file"
+        accept="image/*"
+        onChange={onPhotoSelected}
+        className="hidden"
+        aria-hidden
+      />
+
       <div className="card mt-4" style={{ padding: 0, overflow: 'hidden' }}>
         <div className="photo-thumb" style={{ borderRadius: 0, border: 'none' }}>
           {photoPreviewUrl ? (
@@ -580,34 +608,59 @@ function ReadyBody({
             'BADGE PHOTO — TAP CAMERA'
           )}
         </div>
-        <div className="row" style={{ padding: 12, gap: 8 }}>
-          <label
-            className="icon-btn cursor-pointer"
-            style={{ flex: 1, width: 'auto' }}
+        <div
+          style={{
+            display: 'flex',
+            padding: 12,
+            gap: 8,
+            alignItems: 'stretch',
+            flexShrink: 0,
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => cameraInputRef.current?.click()}
+            style={{
+              flex: '1 1 0',
+              height: 44,
+              minHeight: 44,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 12,
+              border: '1px solid var(--rule-2)',
+              background: 'var(--surface)',
+              color: 'var(--ink-2)',
+              cursor: 'pointer',
+              font: 'inherit',
+              padding: '0 12px',
+            }}
           >
             <Camera size={18} />
             <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 500 }}>Camera</span>
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={onPhotoSelected}
-              className="hidden"
-            />
-          </label>
-          <label
-            className="icon-btn cursor-pointer"
-            style={{ flex: 1, width: 'auto' }}
+          </button>
+          <button
+            type="button"
+            onClick={() => libraryInputRef.current?.click()}
+            style={{
+              flex: '1 1 0',
+              height: 44,
+              minHeight: 44,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 12,
+              border: '1px solid var(--rule-2)',
+              background: 'var(--surface)',
+              color: 'var(--ink-2)',
+              cursor: 'pointer',
+              font: 'inherit',
+              padding: '0 12px',
+            }}
           >
             <ImageIcon size={18} />
             <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 500 }}>Library</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={onPhotoSelected}
-              className="hidden"
-            />
-          </label>
+          </button>
         </div>
       </div>
 

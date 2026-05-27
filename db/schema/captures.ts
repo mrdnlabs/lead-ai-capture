@@ -17,6 +17,7 @@ export const captures = pgTable('captures', {
   hadRealtimeAssist: boolean('had_realtime_assist').notNull().default(false),
   realtimeProviderConfigId: uuid('realtime_provider_config_id').references(() => providerConfigs.id, { onDelete: 'set null' }),
   realtimeTranscript: jsonb('realtime_transcript').$type<Array<Record<string, unknown>>>(),
+  liveFields: jsonb('live_fields').$type<Record<string, { value: string; confidence?: number; at: number }>>(),
   status: captureStatusEnum('status').notNull().default('queued'),
   clientCapturedAt: timestamp('client_captured_at', { withTimezone: true }).notNull(),
   serverReceivedAt: timestamp('server_received_at', { withTimezone: true }).notNull().defaultNow(),

@@ -235,17 +235,24 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
     }
   }
 
-  // 7. Reconcile badge + transcript fields via LLM (with rule-based fallback inside reconcileFields)
+  // 7. Reconcile badge + transcript + live fields via LLM (with rule-based fallback inside reconcileFields)
+  const liveFields =
+    capture.liveFields && typeof capture.liveFields === 'object'
+      ? (capture.liveFields as Record<string, { value: string; confidence?: number; at: number }>)
+      : undefined;
   let mergedNew: Record<string, unknown> = {};
   let confidenceScores: Record<string, number> = {};
   if (
     extractionResolved &&
-    (Object.keys(badgeFields).length > 0 || Object.keys(transcriptFields).length > 0)
+    (Object.keys(badgeFields).length > 0 ||
+      Object.keys(transcriptFields).length > 0 ||
+      (liveFields && Object.keys(liveFields).length > 0))
   ) {
     try {
       const reconciled = await reconcileFields({
         badgeFields,
         transcriptFields,
+        liveFields,
         extractionConfig: extractionResolved.config,
         credentialApiKey: extractionResolved.credential.apiKey,
         captureId,

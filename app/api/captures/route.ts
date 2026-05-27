@@ -83,6 +83,21 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
   }
 
+  // Optional liveFields: values the AI captured via set_lead_field tool calls
+  // during the live conversation. High signal — rep verbally confirmed each.
+  let liveFields: Record<string, { value: string; confidence?: number; at: number }> | null = null;
+  const liveFieldsField = form.get('liveFields');
+  if (typeof liveFieldsField === 'string' && liveFieldsField.length > 0) {
+    try {
+      const parsed = JSON.parse(liveFieldsField);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        liveFields = parsed;
+      }
+    } catch {
+      /* malformed liveFields — ignore, not fatal */
+    }
+  }
+
   const membership = await getShowMembership(rep.id, meta.showSlug);
   if (!membership) {
     return NextResponse.json({ error: 'Not a member of this show' }, { status: 403 });
@@ -182,6 +197,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       durationMs: meta.durationMs ?? null,
       hadRealtimeAssist: realtimeTranscript !== null,
       realtimeTranscript: realtimeTranscript ?? undefined,
+      liveFields: liveFields ?? undefined,
       status: 'uploaded',
       clientCapturedAt: new Date(meta.clientCapturedAt),
     });

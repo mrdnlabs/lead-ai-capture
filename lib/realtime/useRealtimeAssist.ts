@@ -10,6 +10,26 @@ export interface TranscriptEntry {
   at: number;
 }
 
+export interface RequiredField {
+  key: string;
+  label: string;
+  required: boolean;
+}
+
+export interface LiveFieldValue {
+  value: string;
+  confidence?: number;
+  at: number;
+}
+
+export type LiveFields = Record<string, LiveFieldValue>;
+
+export interface ExistingLeadMatch {
+  opportunityCode: string;
+  reason: string;
+  at: number;
+}
+
 interface TokenResponse {
   token: string;
   expiresAt: number;
@@ -20,6 +40,8 @@ interface TokenResponse {
   providerConfigId: string;
   /** Present for Gemini Live — sent as first WSS message to configure session. */
   setupMessage?: unknown;
+  /** Fields the AI is expected to collect (drives the checklist UI). */
+  requiredFields?: RequiredField[];
 }
 
 interface StartArgs {
@@ -75,6 +97,9 @@ export function useRealtimeAssist() {
   const [status, setStatus] = useState<RealtimeStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [requiredFields, setRequiredFields] = useState<RequiredField[]>([]);
+  const [liveFields, setLiveFields] = useState<LiveFields>({});
+  const [existingLeadMatches, setExistingLeadMatches] = useState<ExistingLeadMatch[]>([]);
   const ctxRef = useRef<RealtimeContext | null>(null);
   const startedRef = useRef(false);
 
@@ -141,6 +166,8 @@ export function useRealtimeAssist() {
       setStatus('connecting');
       setError(null);
       setTranscript([]);
+      setLiveFields({});
+      setExistingLeadMatches([]);
 
       // 1. Mint token from our server
       const tokenRes = await fetch('/api/realtime/token', {
@@ -161,6 +188,7 @@ export function useRealtimeAssist() {
         return;
       }
       const tokenData = (await tokenRes.json()) as TokenResponse;
+      if (tokenData.requiredFields) setRequiredFields(tokenData.requiredFields);
 
       // 2. Set up audio plumbing
       const audioCtx = new (window.AudioContext ||
@@ -221,23 +249,42 @@ export function useRealtimeAssist() {
         console.log('[realtime] ws closed', e.code, e.reason);
       };
 
-      ws.onmessage = (e) => handleServerMessage(e, ctx, audioCtx, (entry) => {
-        // Coalesce consecutive same-role chunks into one turn so the bubble
-        // shows "AI: full sentence" instead of one bubble per streamed word.
-        setTranscript((cur) => {
-          const last = cur[cur.length - 1];
-          if (last && last.role === entry.role) {
-            const merged: TranscriptEntry = {
-              role: entry.role,
-              text: last.text + entry.text,
-              at: last.at,
-            };
-            return [...cur.slice(0, -1), merged];
-          }
-          return [...cur, entry];
-        });
-        args.onTranscript?.(entry);
-      });
+      ws.onmessage = (e) =>
+        handleServerMessage(
+          e,
+          ctx,
+          audioCtx,
+          (entry) => {
+            // Coalesce consecutive same-role chunks into one turn so the bubble
+            // shows "AI: full sentence" instead of one bubble per streamed word.
+            setTranscript((cur) => {
+              const last = cur[cur.length - 1];
+              if (last && last.role === entry.role) {
+                const merged: TranscriptEntry = {
+                  role: entry.role,
+                  text: last.text + entry.text,
+                  at: last.at,
+                };
+                return [...cur.slice(0, -1), merged];
+              }
+              return [...cur, entry];
+            });
+            args.onTranscript?.(entry);
+          },
+          (key, value, confidence) => {
+            setLiveFields((cur) => ({
+              ...cur,
+              [key]: { value, confidence, at: Date.now() },
+            }));
+          },
+          (opportunityCode, reason) => {
+            setExistingLeadMatches((cur) => {
+              // Don't re-add the same match within a session.
+              if (cur.some((f) => f.opportunityCode === opportunityCode)) return cur;
+              return [...cur, { opportunityCode, reason, at: Date.now() }];
+            });
+          },
+        );
 
       // 4. Auto-stop at max duration
       if (args.maxDurationSec) {
@@ -249,7 +296,22 @@ export function useRealtimeAssist() {
     [status, stop],
   );
 
-  return { status, error, transcript, start, stop, sendImage };
+  return {
+    status,
+    error,
+    transcript,
+    requiredFields,
+    liveFields,
+    existingLeadMatches,
+    /** Dismiss a match the rep rejected (so the banner goes away). */
+    dismissExistingLeadMatch: (opportunityCode: string) =>
+      setExistingLeadMatches((cur) =>
+        cur.filter((f) => f.opportunityCode !== opportunityCode),
+      ),
+    start,
+    stop,
+    sendImage,
+  };
 }
 
 function startMicStreaming(
@@ -302,6 +364,14 @@ interface InputTranscription {
   finished?: boolean;
 }
 
+interface ToolCallMessage {
+  functionCalls?: Array<{
+    id?: string;
+    name: string;
+    args?: Record<string, unknown>;
+  }>;
+}
+
 function messageToText(data: MessageEvent['data']): string | null {
   if (typeof data === 'string') return data;
   if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
@@ -313,12 +383,15 @@ function handleServerMessage(
   ctx: RealtimeContext,
   audioCtx: AudioContext,
   pushTranscript: (entry: TranscriptEntry) => void,
+  setField: (key: string, value: string, confidence?: number) => void,
+  matchExistingLead: (opportunityCode: string, reason: string) => void,
 ) {
   const text = messageToText(e.data);
   if (!text) return;
   let msg: {
     serverContent?: ServerContent;
     setupComplete?: object;
+    toolCall?: ToolCallMessage;
   };
   try {
     msg = JSON.parse(text);
@@ -351,6 +424,67 @@ function handleServerMessage(
     }
     if (part.text) {
       pushTranscript({ role: 'assistant', text: part.text, at: Date.now() });
+    }
+  }
+
+  // Function calls from the model — update the checklist + acknowledge so the
+  // model knows the value landed. Gemini wants a toolResponse per call id.
+  if (msg.toolCall?.functionCalls && msg.toolCall.functionCalls.length > 0) {
+    const responses: Array<{ id?: string; name: string; response: unknown }> = [];
+    for (const call of msg.toolCall.functionCalls) {
+      const args = call.args ?? {};
+      if (call.name === 'set_lead_field') {
+        const key = typeof args.key === 'string' ? args.key : null;
+        const value = args.value == null ? '' : String(args.value);
+        const confidence =
+          typeof args.confidence === 'number' ? args.confidence : undefined;
+        if (key) {
+          setField(key, value, confidence);
+          responses.push({
+            id: call.id,
+            name: call.name,
+            response: { ok: true, key },
+          });
+        } else {
+          responses.push({
+            id: call.id,
+            name: call.name,
+            response: { ok: false, error: 'missing key' },
+          });
+        }
+      } else if (call.name === 'match_existing_lead') {
+        const opportunityCode =
+          typeof args.opportunityCode === 'string' ? args.opportunityCode : null;
+        const reason = typeof args.reason === 'string' ? args.reason : '';
+        if (opportunityCode) {
+          matchExistingLead(opportunityCode, reason);
+          responses.push({
+            id: call.id,
+            name: call.name,
+            response: {
+              ok: true,
+              note: 'Rep notified — waiting for their confirm.',
+            },
+          });
+        } else {
+          responses.push({
+            id: call.id,
+            name: call.name,
+            response: { ok: false, error: 'missing opportunityCode' },
+          });
+        }
+      } else {
+        responses.push({
+          id: call.id,
+          name: call.name,
+          response: { ok: false, error: `unknown tool ${call.name}` },
+        });
+      }
+    }
+    if (ctx.ws.readyState === WebSocket.OPEN) {
+      ctx.ws.send(
+        JSON.stringify({ toolResponse: { functionResponses: responses } }),
+      );
     }
   }
 }

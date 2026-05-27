@@ -1,4 +1,9 @@
-import type { RealtimeProvider, RealtimeTokenRequest, RealtimeTokenResult } from './types';
+import type {
+  RealtimeProvider,
+  RealtimeToolGroup,
+  RealtimeTokenRequest,
+  RealtimeTokenResult,
+} from './types';
 
 const GEMINI_LIVE_WSS =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -32,6 +37,7 @@ export interface GeminiRealtimeResult extends RealtimeTokenResult {
       generationConfig: { responseModalities: string[] };
       inputAudioTranscription: object;
       outputAudioTranscription: object;
+      tools?: RealtimeToolGroup[];
     };
   };
 }
@@ -63,6 +69,7 @@ export const geminiRealtimeProvider: RealtimeProvider = {
           // as text (verified working on 2.5-native-audio + 3.1-flash-live).
           inputAudioTranscription: {},
           outputAudioTranscription: {},
+          ...(args.tools && args.tools.length > 0 ? { tools: args.tools } : {}),
         },
       },
     };

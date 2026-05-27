@@ -35,11 +35,15 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
   const [durationMs, setDurationMs] = useState<number>(0);
   const [elapsed, setElapsed] = useState<number>(0);
   const [aiAssistEnabled, setAiAssistEnabled] = useState(false);
+  // Set when the rep confirms an AI returning-lead match — this capture will
+  // attach to the existing opportunity instead of creating a new one.
+  const [confirmedExistingLeadCode, setConfirmedExistingLeadCode] = useState<string | null>(null);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const startTimeRef = useRef<number>(0);
   const tickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const realtime = useRealtimeAssist();
 
   useEffect(() => {
@@ -49,6 +53,13 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
       if (tickerRef.current) clearInterval(tickerRef.current);
     };
   }, [audioPreviewUrl, photoPreviewUrl]);
+
+  // Auto-scroll the transcript bubble to the bottom as new chunks arrive so the
+  // rep always sees the most recent exchange without manually scrolling.
+  useEffect(() => {
+    const el = transcriptScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [realtime.transcript, realtime.liveFields]);
 
   async function startRecording() {
     setError(null);
@@ -101,6 +112,23 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     recorderRef.current?.stop();
   }
 
+  // Stop the recorder and resolve with the freshly-built blob. The existing
+  // `rec.onstop` handler still runs first (sets state, stops tracks); this
+  // listener fires after and gives `submit()` a blob to upload immediately
+  // without waiting for a React re-render.
+  function stopRecordingAndWait(): Promise<Blob | null> {
+    const rec = recorderRef.current;
+    if (!rec || rec.state === 'inactive') return Promise.resolve(null);
+    return new Promise<Blob | null>((resolve) => {
+      rec.addEventListener(
+        'stop',
+        () => resolve(new Blob(chunksRef.current, { type: rec.mimeType })),
+        { once: true },
+      );
+      rec.stop();
+    });
+  }
+
   function clearAudio() {
     setAudioBlob(null);
     if (audioPreviewUrl) URL.revokeObjectURL(audioPreviewUrl);
@@ -127,7 +155,19 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
   }
 
   async function submit() {
-    if (!audioBlob && !photoFile) {
+    // If we're still recording, the rep is signaling "I'm done" — stop the
+    // recorder and grab the final blob inline so they don't have to tap twice.
+    let finalAudioBlob = audioBlob;
+    let finalDurationMs = durationMs;
+    if (state === 'recording') {
+      const stopped = await stopRecordingAndWait();
+      if (stopped) {
+        finalAudioBlob = stopped;
+        finalDurationMs = Date.now() - startTimeRef.current;
+      }
+    }
+
+    if (!finalAudioBlob && !photoFile) {
       setError('Add a photo or record audio first.');
       return;
     }
@@ -136,15 +176,21 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
 
     const queuedInput = {
       showSlug,
-      // Empty opportunityCode tells the server: auto-create a placeholder; AI dedupe later.
-      opportunityCode: '',
+      // If the rep confirmed a returning-lead match, ride that opportunity code
+      // so this capture adds to the existing lead. Otherwise empty → server
+      // auto-creates a placeholder and post-hoc AI matching may still re-point.
+      opportunityCode: confirmedExistingLeadCode ?? '',
       clientCapturedAt: new Date().toISOString(),
-      durationMs: durationMs > 0 ? durationMs : undefined,
+      durationMs: finalDurationMs > 0 ? finalDurationMs : undefined,
       photoBlob: photoFile ?? undefined,
-      audioBlob: audioBlob ?? undefined,
+      audioBlob: finalAudioBlob ?? undefined,
       // Preserve the live conversation transcript (rep + AI) so post-processing
       // can extract from it even if audio quality is poor.
       realtimeTranscript: realtime.transcript.length > 0 ? realtime.transcript : undefined,
+      // Values the AI captured via set_lead_field tool calls during the live
+      // session — high-signal because the rep confirmed each one verbally.
+      liveFields:
+        Object.keys(realtime.liveFields).length > 0 ? realtime.liveFields : undefined,
     };
 
     // If clearly offline, skip the doomed network call and enqueue immediately.
@@ -187,6 +233,7 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     clearAudio();
     clearPhoto();
     setError(null);
+    setConfirmedExistingLeadCode(null);
     setState('ready');
   }
 
@@ -317,38 +364,145 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
         </label>
 
         {realtime.status !== 'idle' && realtime.status !== 'closed' ? (
-          <div className="mt-3 max-h-44 overflow-y-auto rounded-md border border-neutral-200 bg-neutral-50 p-2 text-xs">
-            <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-neutral-500">
-              <span
-                className={
-                  'inline-block h-1.5 w-1.5 rounded-full ' +
-                  (realtime.status === 'live'
-                    ? 'animate-pulse bg-green-500'
-                    : realtime.status === 'error'
-                      ? 'bg-red-500'
-                      : realtime.status === 'connecting'
-                        ? 'animate-pulse bg-amber-500'
-                        : 'bg-neutral-300')
-                }
-              />
-              AI {realtime.status}
-            </div>
-            {realtime.error ? (
-              <div className="mt-1 rounded bg-red-50 p-2 text-red-700">{realtime.error}</div>
-            ) : null}
-            {realtime.transcript.length === 0 ? (
-              <div className="mt-1 text-neutral-400">
-                {realtime.status === 'connecting' ? 'Connecting to Gemini…' : 'Listening…'}
-              </div>
-            ) : (
-              <div className="mt-1 space-y-1">
-                {realtime.transcript.map((t, i) => (
-                  <div key={i} className={t.role === 'assistant' ? 'text-blue-700' : 'text-neutral-700'}>
-                    <span className="font-medium">{t.role === 'assistant' ? 'AI' : 'You'}:</span> {t.text}
+          <div className="mt-3 space-y-2">
+            {/* Returning-lead match banner(s) — rep confirms or dismisses. */}
+            {realtime.existingLeadMatches.map((match) => {
+              const isConfirmed = confirmedExistingLeadCode === match.opportunityCode;
+              return (
+                <div
+                  key={match.opportunityCode}
+                  className={
+                    'rounded-md border p-2 text-xs ' +
+                    (isConfirmed
+                      ? 'border-emerald-300 bg-emerald-50'
+                      : 'border-sky-300 bg-sky-50')
+                  }
+                >
+                  <div className="font-medium text-neutral-900">
+                    {isConfirmed
+                      ? `Adding to ${match.opportunityCode}`
+                      : `Returning lead? ${match.opportunityCode}`}
                   </div>
-                ))}
+                  <div className="mt-0.5 text-neutral-700">{match.reason}</div>
+                  {!isConfirmed ? (
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmedExistingLeadCode(match.opportunityCode)}
+                        className="rounded-md bg-emerald-600 px-2 py-1 text-xs font-medium text-white"
+                      >
+                        Yes, expand this lead
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => realtime.dismissExistingLeadMatch(match.opportunityCode)}
+                        className="rounded-md border border-neutral-300 bg-white px-2 py-1 text-xs font-medium text-neutral-700"
+                      >
+                        No, different person
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmedExistingLeadCode(null);
+                        realtime.dismissExistingLeadMatch(match.opportunityCode);
+                      }}
+                      className="mt-2 text-xs text-neutral-500 underline"
+                    >
+                      undo
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Live checklist — fills in as the AI calls set_lead_field. */}
+            {realtime.requiredFields.length > 0 ? (
+              <div className="rounded-md border border-neutral-200 bg-white p-2 text-xs">
+                <div className="mb-1.5 text-[10px] uppercase tracking-wide text-neutral-500">
+                  Checklist
+                </div>
+                <ul className="space-y-1">
+                  {realtime.requiredFields.map((f) => {
+                    const captured = realtime.liveFields[f.key];
+                    const done = captured && captured.value;
+                    const lowConf =
+                      captured?.confidence != null && captured.confidence < 0.8;
+                    return (
+                      <li key={f.key} className="flex items-start gap-2">
+                        <span
+                          className={
+                            'mt-0.5 inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border text-[10px] font-bold ' +
+                            (done
+                              ? lowConf
+                                ? 'border-amber-500 bg-amber-100 text-amber-700'
+                                : 'border-green-600 bg-green-600 text-white'
+                              : f.required
+                                ? 'border-neutral-400 text-neutral-400'
+                                : 'border-neutral-200 text-neutral-300')
+                          }
+                          aria-hidden
+                        >
+                          {done ? '✓' : f.required ? '★' : ''}
+                        </span>
+                        <span className="flex-1">
+                          <span className="text-neutral-700">{f.label}</span>
+                          {done ? (
+                            <span className="ml-1 font-medium text-neutral-900">
+                              · {captured.value}
+                            </span>
+                          ) : null}
+                          {lowConf && captured?.confidence != null ? (
+                            <span className="ml-1 text-[10px] text-amber-700">
+                              ({Math.round(captured.confidence * 100)}% — needs verify)
+                            </span>
+                          ) : null}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
               </div>
-            )}
+            ) : null}
+
+            {/* Live transcript bubble */}
+            <div
+              ref={transcriptScrollRef}
+              className="max-h-44 overflow-y-auto rounded-md border border-neutral-200 bg-neutral-50 p-2 text-xs"
+            >
+              <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-neutral-500">
+                <span
+                  className={
+                    'inline-block h-1.5 w-1.5 rounded-full ' +
+                    (realtime.status === 'live'
+                      ? 'animate-pulse bg-green-500'
+                      : realtime.status === 'error'
+                        ? 'bg-red-500'
+                        : realtime.status === 'connecting'
+                          ? 'animate-pulse bg-amber-500'
+                          : 'bg-neutral-300')
+                  }
+                />
+                AI {realtime.status}
+              </div>
+              {realtime.error ? (
+                <div className="mt-1 rounded bg-red-50 p-2 text-red-700">{realtime.error}</div>
+              ) : null}
+              {realtime.transcript.length === 0 ? (
+                <div className="mt-1 text-neutral-400">
+                  {realtime.status === 'connecting' ? 'Connecting to Gemini…' : 'Listening…'}
+                </div>
+              ) : (
+                <div className="mt-1 space-y-1">
+                  {realtime.transcript.map((t, i) => (
+                    <div key={i} className={t.role === 'assistant' ? 'text-blue-700' : 'text-neutral-700'}>
+                      <span className="font-medium">{t.role === 'assistant' ? 'AI' : 'You'}:</span> {t.text}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         ) : null}
       </section>
@@ -358,10 +512,14 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
       <button
         type="button"
         onClick={submit}
-        disabled={state === 'recording' || state === 'uploading' || (!audioBlob && !photoFile)}
+        disabled={state === 'uploading' || (state !== 'recording' && !audioBlob && !photoFile)}
         className="block w-full rounded-md bg-emerald-700 px-3 py-3 text-sm font-medium text-white disabled:opacity-50"
       >
-        {state === 'uploading' ? 'Uploading…' : 'Submit capture'}
+        {state === 'uploading'
+          ? 'Uploading…'
+          : state === 'recording'
+            ? 'Stop & submit'
+            : 'Submit capture'}
       </button>
     </div>
   );

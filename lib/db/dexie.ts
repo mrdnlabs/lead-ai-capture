@@ -10,6 +10,7 @@ export interface OutboxItem {
   photoBlob?: Blob;
   audioBlob?: Blob;
   realtimeTranscript?: Array<{ role: 'user' | 'assistant'; text: string; at: number }>;
+  liveFields?: Record<string, { value: string; confidence?: number; at: number }>;
   queuedAt: number;
   lastAttemptAt?: number;
   attempts: number;

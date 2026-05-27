@@ -11,6 +11,8 @@ export interface QueuedCaptureInput {
   photoBlob?: Blob;
   audioBlob?: Blob;
   realtimeTranscript?: Array<{ role: 'user' | 'assistant'; text: string; at: number }>;
+  /** Values the AI captured via tool calls during the live conversation. */
+  liveFields?: Record<string, { value: string; confidence?: number; at: number }>;
 }
 
 export async function enqueueCapture(input: QueuedCaptureInput): Promise<OutboxItem> {
@@ -66,6 +68,9 @@ export async function uploadOne(item: OutboxItem): Promise<void> {
   }
   if (item.realtimeTranscript && item.realtimeTranscript.length > 0) {
     form.set('realtimeTranscript', JSON.stringify(item.realtimeTranscript));
+  }
+  if (item.liveFields && Object.keys(item.liveFields).length > 0) {
+    form.set('liveFields', JSON.stringify(item.liveFields));
   }
   const res = await fetch('/api/captures', {
     method: 'POST',

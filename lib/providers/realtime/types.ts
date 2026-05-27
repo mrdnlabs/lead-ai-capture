@@ -1,6 +1,16 @@
 import type { ProviderConfig } from '@/db/schema';
 import type { DecryptedCredential, ProviderCallContext } from '../types';
 
+export interface RealtimeFunctionDeclaration {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}
+
+export interface RealtimeToolGroup {
+  functionDeclarations: RealtimeFunctionDeclaration[];
+}
+
 export interface RealtimeTokenRequest {
   ctx: ProviderCallContext;
   instructions: string;
@@ -8,6 +18,8 @@ export interface RealtimeTokenRequest {
   maxDurationSec?: number;
   /** Acceptable model override; defaults to the provider config's model. */
   model?: string;
+  /** Function-calling tool definitions, in Gemini's `tools[].functionDeclarations` shape. */
+  tools?: RealtimeToolGroup[];
 }
 
 export interface RealtimeTokenResult {

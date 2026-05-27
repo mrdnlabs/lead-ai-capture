@@ -219,15 +219,14 @@ function startMicStreaming(
     if (ws.readyState !== WebSocket.OPEN) return;
     const input = event.inputBuffer.getChannelData(0);
     const b64 = float32ToPcm16Base64(input);
+    // New Gemini Live wire format (replaces deprecated realtimeInput.mediaChunks)
     ws.send(
       JSON.stringify({
         realtimeInput: {
-          mediaChunks: [
-            {
-              mimeType: 'audio/pcm;rate=16000',
-              data: b64,
-            },
-          ],
+          audio: {
+            mimeType: 'audio/pcm;rate=16000',
+            data: b64,
+          },
         },
       }),
     );

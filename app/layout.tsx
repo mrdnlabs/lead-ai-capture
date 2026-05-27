@@ -1,26 +1,28 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { ToastHost } from "@/components/ui/ToastHost";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const hanken = Hanken_Grotesk({
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-hanken",
 });
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const jetbrains = JetBrains_Mono({
   subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-jetbrains",
 });
 
 export const metadata: Metadata = {
-  title: "AI Capture",
-  description: "AI-native trade-show lead capture.",
-  applicationName: "AI Capture",
+  title: "red5 / capture",
+  description: "Trade-show lead capture · published by red5.",
+  applicationName: "red5 capture",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "AI Capture",
+    title: "red5 capture",
   },
   icons: {
     icon: [
@@ -32,7 +34,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport = {
-  themeColor: "#171717",
+  themeColor: "#0E0E0C",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
@@ -47,9 +49,12 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${hanken.variable} ${jetbrains.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col bg-paper text-ink font-sans">
+        {children}
+        <ToastHost />
+      </body>
     </html>
   );
 }

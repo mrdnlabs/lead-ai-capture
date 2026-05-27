@@ -49,3 +49,4 @@ tests/scenario-runs/
 # Bundles built for design review
 design-bundle/
 design-bundle*.zip
+.design-ref/

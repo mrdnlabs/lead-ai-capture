@@ -37,6 +37,8 @@ export interface ExistingLeadMatch {
   opportunityCode: string;
   reason: string;
   at: number;
+  /** Display name derived from the lead's known fields (if available). */
+  name?: string;
 }
 
 interface TokenResponse {
@@ -510,10 +512,15 @@ export function useRealtimeAssist() {
             }));
           },
           (opportunityCode, reason) => {
+            const known = existingLeadsRef.current.get(opportunityCode);
+            const name =
+              known?.name ||
+              [known?.first_name, known?.last_name].filter(Boolean).join(' ') ||
+              undefined;
             setExistingLeadMatches((cur) => {
               // Don't re-add the same match within a session.
               if (cur.some((f) => f.opportunityCode === opportunityCode)) return cur;
-              return [...cur, { opportunityCode, reason, at: Date.now() }];
+              return [...cur, { opportunityCode, reason, at: Date.now(), name }];
             });
             // Optimistically prefill — rep can roll back via the banner.
             applyExistingLeadPrefill(opportunityCode);

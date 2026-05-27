@@ -1,14 +1,36 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import {
+  ArrowLeft,
+  Camera,
+  ChevronRight,
+  Image as ImageIcon,
+  Send,
+  Sparkles,
+  User,
+  X,
+  Check,
+} from 'lucide-react';
 import { drainQueue, enqueueCapture, uploadOne } from '@/lib/offline/queue';
 import { useRealtimeAssist } from '@/lib/realtime/useRealtimeAssist';
-import { isDebugEnabled, setDebugEnabled } from '@/lib/debug/log';
+import { showToast } from '@/lib/ui/toast';
+import { DevPanel } from '@/components/dev/DevPanel';
+import { QueuePill } from '@/components/ui/QueuePill';
+import { ShowSwatch } from '@/components/ui/ShowSwatch';
+import { ShowSwitcherSheet, type Show, type ShowSummary } from '@/components/show/ShowSwitcherSheet';
+import { LeadPickerSheet, type PickedLead } from '@/components/sheets/LeadPickerSheet';
+import { QueueSheet } from '@/components/sheets/QueueSheet';
+import { subscribeQueueChanges, queueCount } from '@/lib/offline/queue';
 
-type State = 'ready' | 'recording' | 'uploading' | 'done' | 'queued' | 'error';
+type State = 'ready' | 'recording' | 'uploading' | 'error';
+type ActiveSheet = null | 'switch' | 'pick' | 'queue';
 
 interface Props {
   showSlug: string;
+  show: Show;
+  shows: ShowSummary[];
   leadsUrl: string;
 }
 
@@ -26,28 +48,33 @@ function pickAudioMime(): string | undefined {
   return undefined;
 }
 
-export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
+export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
+  const searchParams = useSearchParams();
+  const devMode = searchParams.get('dev') === '1';
+
   const [state, setState] = useState<State>('ready');
   const [error, setError] = useState<string | null>(null);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
-  const [audioPreviewUrl, setAudioPreviewUrl] = useState<string | null>(null);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [durationMs, setDurationMs] = useState<number>(0);
   const [elapsed, setElapsed] = useState<number>(0);
-  const [aiAssistEnabled, setAiAssistEnabled] = useState(false);
-  // Set when the rep confirms an AI returning-lead match — this capture will
-  // attach to the existing opportunity instead of creating a new one.
-  const [confirmedExistingLeadCode, setConfirmedExistingLeadCode] = useState<string | null>(null);
+  const [aiAssistEnabled, setAiAssistEnabled] = useState(true);
+  /** Set when AI flagged a match OR rep picked from LeadPickerSheet — the
+   *  next submit attaches to this opportunity instead of creating one. */
+  const [targetLead, setTargetLead] = useState<{ code: string; name: string } | null>(null);
   const [textDraft, setTextDraft] = useState('');
-  // Dev toggle — when true, treat the app as offline (force submit through
-  // the Dexie queue path even if the browser is actually online).
   const [simulatedOffline, setSimulatedOffline] = useState(false);
-  // Mirrors localStorage 'aicapture.debug' — turning it on archives every
-  // WSS send/receive to Dexie so you can inspect what the AI saw and said.
-  const [debugMode, setDebugMode] = useState(false);
+  const [activeSheet, setActiveSheet] = useState<ActiveSheet>(null);
+
+  // Queue + sync indicators for the header pill.
+  const [queueLen, setQueueLen] = useState(0);
+  const [syncing, setSyncing] = useState(0);
   useEffect(() => {
-    setDebugMode(isDebugEnabled());
+    void queueCount().then(setQueueLen);
+    return subscribeQueueChanges(() => {
+      void queueCount().then(setQueueLen);
+    });
   }, []);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -59,40 +86,45 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
 
   useEffect(() => {
     return () => {
-      if (audioPreviewUrl) URL.revokeObjectURL(audioPreviewUrl);
       if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
       if (tickerRef.current) clearInterval(tickerRef.current);
     };
-  }, [audioPreviewUrl, photoPreviewUrl]);
+  }, [photoPreviewUrl]);
 
-  // Auto-scroll the transcript bubble to the bottom as new chunks arrive so the
-  // rep always sees the most recent exchange without manually scrolling.
   useEffect(() => {
     const el = transcriptScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [realtime.transcript, realtime.liveFields]);
 
-  // When the simulated-offline toggle flips back to online, drain anything that
-  // queued up while it was on. Mirrors the real online-event auto-drain.
   useEffect(() => {
-    if (!simulatedOffline) {
-      void drainQueue().catch(() => {});
-    }
+    if (!simulatedOffline) void drainQueue().catch(() => {});
   }, [simulatedOffline]);
 
-  // When the live AI calls end_conversation, treat it as the rep tapping
-  // "Stop & submit" — close the session and submit the capture automatically.
-  // Guarded so we only fire once per session.
+  // AI flagged a match → auto-set as targetLead (one-tap "Yes" replaced).
+  // The match-banner shows with a "not them" button so the rep can roll back.
+  const lastSeenMatchRef = useRef<number | null>(null);
+  useEffect(() => {
+    const latest = realtime.existingLeadMatches[realtime.existingLeadMatches.length - 1];
+    if (!latest) return;
+    if (lastSeenMatchRef.current === latest.at) return;
+    lastSeenMatchRef.current = latest.at;
+    if (!targetLead) {
+      setTargetLead({
+        code: latest.opportunityCode,
+        name: latest.name ?? latest.opportunityCode,
+      });
+    }
+  }, [realtime.existingLeadMatches, targetLead]);
+
+  // AI calls end_conversation → auto-submit.
   const endHandledRef = useRef<number | null>(null);
   useEffect(() => {
     const req = realtime.endRequested;
-    if (!req) return;
-    if (endHandledRef.current === req.at) return;
+    if (!req || endHandledRef.current === req.at) return;
     endHandledRef.current = req.at;
-    if (state === 'ready' || state === 'recording') {
-      void submit();
-    }
-  }, [realtime.endRequested, state]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (state === 'ready' || state === 'recording') void submit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realtime.endRequested, state]);
 
   async function startRecording() {
     setError(null);
@@ -109,7 +141,6 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
       rec.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: rec.mimeType });
         setAudioBlob(blob);
-        setAudioPreviewUrl(URL.createObjectURL(blob));
         setDurationMs(Date.now() - startTimeRef.current);
         for (const track of stream.getTracks()) track.stop();
         if (tickerRef.current) clearInterval(tickerRef.current);
@@ -119,18 +150,20 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
       rec.start();
       recorderRef.current = rec;
       startTimeRef.current = Date.now();
+      setElapsed(0);
       setState('recording');
-      tickerRef.current = setInterval(() => setElapsed(Date.now() - startTimeRef.current), 200);
+      tickerRef.current = setInterval(
+        () => setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000)),
+        500,
+      );
 
-      // AI assist runs in parallel: clones the mic track so MediaRecorder + realtime are independent
       if (aiAssistEnabled) {
         const clonedTrack = stream.getAudioTracks()[0]?.clone();
         if (clonedTrack) {
-          const realtimeStream = new MediaStream([clonedTrack]);
           void realtime.start({
             showSlug,
-            opportunityCode: '',
-            micStream: realtimeStream,
+            opportunityCode: targetLead?.code ?? '',
+            micStream: new MediaStream([clonedTrack]),
             maxDurationSec: 120,
           });
         }
@@ -150,9 +183,6 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
       return;
     }
     const rec = recorderRef.current;
-    // Mark chunks empty so any pending onstop produces a 0-byte blob we then
-    // throw away below. This avoids a race where rec.stop() triggers onstop
-    // mid-discard and re-sets audioBlob to a partial recording.
     chunksRef.current = [];
     if (rec && rec.state !== 'inactive') {
       try {
@@ -164,20 +194,14 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     if (tickerRef.current) clearInterval(tickerRef.current);
     realtime.stop();
     setAudioBlob(null);
-    if (audioPreviewUrl) URL.revokeObjectURL(audioPreviewUrl);
-    setAudioPreviewUrl(null);
     setDurationMs(0);
     setElapsed(0);
     setTextDraft('');
-    setConfirmedExistingLeadCode(null);
+    setTargetLead(null);
     setError(null);
     setState('ready');
   }
 
-  // Stop the recorder and resolve with the freshly-built blob. The existing
-  // `rec.onstop` handler still runs first (sets state, stops tracks); this
-  // listener fires after and gives `submit()` a blob to upload immediately
-  // without waiting for a React re-render.
   function stopRecordingAndWait(): Promise<Blob | null> {
     const rec = recorderRef.current;
     if (!rec || rec.state === 'inactive') return Promise.resolve(null);
@@ -191,36 +215,30 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
     });
   }
 
-  function clearAudio() {
-    setAudioBlob(null);
-    if (audioPreviewUrl) URL.revokeObjectURL(audioPreviewUrl);
-    setAudioPreviewUrl(null);
-    setDurationMs(0);
-    setElapsed(0);
-  }
-
-  function clearPhoto() {
-    setPhotoFile(null);
-    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
-    setPhotoPreviewUrl(null);
-  }
-
   function onPhotoSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setPhotoFile(file);
+    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
     setPhotoPreviewUrl(URL.createObjectURL(file));
-    // If a live session is going, run the photo through the structured vision
-    // pipeline server-side and inject the result into the AI conversation as
-    // facts (the AI then decides what to do with them — set_lead_field,
-    // match_existing_lead, etc.). No-op if not live; the photo is uploaded
-    // with the capture on Submit regardless.
     void realtime.sendImage(file, showSlug);
   }
 
+  /** Reset to a fresh `ready` for the next capture — used after submit. */
+  function resetForNext() {
+    setAudioBlob(null);
+    setPhotoFile(null);
+    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
+    setPhotoPreviewUrl(null);
+    setDurationMs(0);
+    setElapsed(0);
+    setTextDraft('');
+    setTargetLead(null);
+    setError(null);
+    setState('ready');
+  }
+
   async function submit() {
-    // If we're still recording, the rep is signaling "I'm done" — stop the
-    // recorder and grab the final blob inline so they don't have to tap twice.
     let finalAudioBlob = audioBlob;
     let finalDurationMs = durationMs;
     if (state === 'recording') {
@@ -240,492 +258,548 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
 
     const queuedInput = {
       showSlug,
-      // If the rep confirmed a returning-lead match, ride that opportunity code
-      // so this capture adds to the existing lead. Otherwise empty → server
-      // auto-creates a placeholder and post-hoc AI matching may still re-point.
-      opportunityCode: confirmedExistingLeadCode ?? '',
+      opportunityCode: targetLead?.code ?? '',
       clientCapturedAt: new Date().toISOString(),
       durationMs: finalDurationMs > 0 ? finalDurationMs : undefined,
       photoBlob: photoFile ?? undefined,
       audioBlob: finalAudioBlob ?? undefined,
-      // Preserve the live conversation transcript (rep + AI) so post-processing
-      // can extract from it even if audio quality is poor.
       realtimeTranscript: realtime.transcript.length > 0 ? realtime.transcript : undefined,
-      // Values the AI captured via set_lead_field tool calls during the live
-      // session — high-signal because the rep confirmed each one verbally.
       liveFields:
         Object.keys(realtime.liveFields).length > 0 ? realtime.liveFields : undefined,
     };
 
-    // If offline (real or simulated), skip the doomed network call and enqueue.
-    const isOffline =
+    const wasTargeted = !!targetLead;
+    const wasOffline =
       simulatedOffline ||
       (typeof navigator !== 'undefined' && navigator.onLine === false);
-    if (isOffline) {
+
+    // Snapshot for the toast, then immediately reset so the rep can start the
+    // next capture. The upload continues in the background.
+    resetForNext();
+
+    if (wasOffline) {
       try {
         await enqueueCapture(queuedInput);
-        setState('queued');
-        return;
+        showToast({
+          kind: 'offline',
+          title: 'Saved offline',
+          meta: 'Will sync when you reconnect.',
+          action: { label: 'View queue', onClick: () => setActiveSheet('queue') },
+        });
       } catch (e) {
-        setError(`Could not queue capture: ${(e as Error).message}`);
-        setState('error');
-        return;
+        showToast({ kind: 'offline', title: 'Could not save', meta: (e as Error).message });
       }
+      return;
     }
 
-    // Online: try direct upload via the same payload shape uploadOne uses.
-    const idempotencyKey = crypto.randomUUID();
+    setSyncing((n) => n + 1);
     try {
       await uploadOne({
         id: 'inline',
-        idempotencyKey,
+        idempotencyKey: crypto.randomUUID(),
         queuedAt: Date.now(),
         attempts: 0,
         ...queuedInput,
       });
-      setState('done');
+      showToast(
+        wasTargeted
+          ? { kind: 'accent', title: 'Updated existing lead', meta: targetLead?.code }
+          : { kind: 'ok', title: 'Lead saved', meta: 'AI is extracting in the background.' },
+      );
     } catch (e) {
-      // Network error or 5xx — fall back to the queue so the rep doesn't lose data.
       try {
         await enqueueCapture(queuedInput);
-        setState('queued');
-      } catch (qe) {
-        setError(`Upload failed: ${(e as Error).message}; queue also failed: ${(qe as Error).message}`);
-        setState('error');
+        showToast({
+          kind: 'offline',
+          title: 'Saved offline',
+          meta: 'Upload retried — will sync when you reconnect.',
+          action: { label: 'View queue', onClick: () => setActiveSheet('queue') },
+        });
+      } catch {
+        showToast({ kind: 'offline', title: 'Capture failed', meta: (e as Error).message });
       }
+    } finally {
+      setSyncing((n) => Math.max(0, n - 1));
     }
   }
 
-  function reset() {
-    clearAudio();
-    clearPhoto();
-    setError(null);
-    setConfirmedExistingLeadCode(null);
-    setState('ready');
-  }
-
-  if (state === 'done' || state === 'queued') {
-    return (
-      <div className="space-y-4">
-        <div
-          className={
-            state === 'queued'
-              ? 'rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800'
-              : 'rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800'
-          }
-        >
-          {state === 'queued'
-            ? simulatedOffline
-              ? 'Saved to local queue (simulated offline). Toggle off and the auto-drain will upload it.'
-              : 'Saved locally. Will upload when you’re back online.'
-            : 'Capture uploaded.'}
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={reset}
-            className="flex-1 rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white"
-          >
-            New capture
-          </button>
-          <a
-            href={leadsUrl}
-            className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-center text-sm font-medium"
-          >
-            View leads
-          </a>
-        </div>
-      </div>
-    );
-  }
+  // Format elapsed seconds as MM:SS
+  const mmss = useMemo(() => {
+    const e = state === 'recording' ? elapsed : 0;
+    return `${String(Math.floor(e / 60)).padStart(2, '0')}:${String(e % 60).padStart(2, '0')}`;
+  }, [elapsed, state]);
 
   return (
-    <div className="space-y-4">
-      {/* Capture block — voice + attachments + AI assist all live here */}
-      <section className="rounded-lg border border-neutral-200 p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm font-medium">Voice note</div>
-            <div className="text-xs text-neutral-500">
-              {state === 'recording'
-                ? `Recording · ${(elapsed / 1000).toFixed(1)}s`
-                : audioBlob
-                  ? `Recorded · ${(durationMs / 1000).toFixed(1)}s`
-                  : 'Hold the mic to talk about the lead.'}
-            </div>
-          </div>
-          {audioBlob ? (
-            <button type="button" onClick={clearAudio} className="text-xs text-neutral-500 underline">
-              clear
-            </button>
-          ) : null}
-        </div>
-        {audioPreviewUrl ? (
-          <audio controls src={audioPreviewUrl} className="mt-3 w-full" />
-        ) : null}
-        <div className="mt-3 space-y-2">
+    <div className="scr">
+      {/* ────── top bar ────── */}
+      <div className="scr-top">
+        {state === 'recording' ? (
+          <div className="t-eyebrow whitespace-nowrap">{show.name}</div>
+        ) : (
+          <button
+            type="button"
+            className="show-pill"
+            onClick={() => setActiveSheet('switch')}
+            aria-label="Switch show"
+          >
+            <ShowSwatch slug={show.slug} name={show.name} size="xs" />
+            <span className="nm">{show.name}</span>
+            <ChevronRight size={14} className="text-ink-4 rotate-90" />
+          </button>
+        )}
+
+        <div className="row gap-2">
           {state === 'recording' ? (
-            <>
-              <button
-                type="button"
-                onClick={stopRecording}
-                className="w-full rounded-md bg-red-600 px-3 py-3 text-sm font-medium text-white"
-              >
-                Stop recording
-              </button>
-              <button
-                type="button"
-                onClick={discardRecording}
-                className="w-full rounded-md border border-neutral-300 px-3 py-2 text-xs font-medium text-neutral-600"
-              >
-                Discard recording
-              </button>
-            </>
+            <span className="pill pill-live">
+              <span className="dot" aria-hidden />
+              <span style={{ fontVariantNumeric: 'tabular-nums' }}>{mmss}</span>
+            </span>
           ) : (
-            <button
-              type="button"
-              onClick={startRecording}
-              disabled={state === 'uploading'}
-              className="w-full rounded-md bg-neutral-900 px-3 py-3 text-sm font-medium text-white disabled:opacity-50"
-            >
-              {audioBlob ? 'Re-record' : 'Start recording'}
-            </button>
+            <QueuePill
+              count={queueLen}
+              syncing={syncing}
+              onClick={() => setActiveSheet('queue')}
+            />
           )}
         </div>
+      </div>
 
-        {/* Attachment toolbar — photo + text input. Photo always available;
-            text only sends to AI when a live session is active. */}
-        <div className="mt-3 space-y-2">
-          {photoPreviewUrl ? (
-            <div className="flex items-center gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-2">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={photoPreviewUrl}
-                alt="attached"
-                className="h-12 w-12 rounded object-cover"
-              />
-              <div className="flex-1 text-xs text-neutral-600">
-                Photo attached
-                {realtime.status === 'live' && realtime.imageExtractStatus === 'done' ? (
-                  <span className="ml-1 text-emerald-700">· read by AI</span>
-                ) : realtime.status === 'live' && realtime.imageExtractStatus === 'extracting' ? (
-                  <span className="ml-1 text-sky-700">· reading…</span>
-                ) : realtime.status === 'live' && realtime.imageExtractStatus === 'error' ? (
-                  <span className="ml-1 text-red-700">· read failed</span>
-                ) : null}
-              </div>
-              <button
-                type="button"
-                onClick={clearPhoto}
-                className="text-xs text-neutral-500 underline"
-              >
-                remove
-              </button>
-            </div>
-          ) : null}
-          <div className="flex items-stretch gap-2">
-            {/* Camera — uses capture="environment" so mobile goes straight to
-                the rear camera. Falls back to file picker on desktop. */}
-            <label
-              className="flex cursor-pointer items-center justify-center rounded-md border border-neutral-300 bg-white px-3 text-sm hover:bg-neutral-50"
-              title="Take photo with camera"
-            >
-              <span aria-hidden>📷</span>
-              <span className="sr-only">Take photo</span>
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={onPhotoSelected}
-                className="hidden"
-              />
-            </label>
-            {/* Browse — no capture attr, opens the file picker so the rep
-                can pick a photo they took earlier with the regular camera. */}
-            <label
-              className="flex cursor-pointer items-center justify-center rounded-md border border-neutral-300 bg-white px-3 text-sm hover:bg-neutral-50"
-              title="Browse to a photo on this device"
-            >
-              <span aria-hidden>📎</span>
-              <span className="sr-only">Browse photos</span>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={onPhotoSelected}
-                className="hidden"
-              />
-            </label>
-            <input
-              type="text"
-              value={textDraft}
-              onChange={(e) => setTextDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  if (realtime.status === 'live' && textDraft.trim()) {
-                    realtime.sendText(textDraft);
-                    setTextDraft('');
-                  }
-                }
-              }}
-              placeholder={
-                realtime.status === 'live'
-                  ? 'Type a note to the AI (or just talk)…'
-                  : 'Enable AI assist to chat by text'
+      {/* ────── body ────── */}
+      <div className="scr-body">
+        {state === 'recording' ? (
+          <LiveBody
+            transcript={realtime.transcript}
+            liveFields={realtime.liveFields}
+            requiredFields={realtime.requiredFields}
+            existingMatch={
+              targetLead
+                ? { code: targetLead.code, name: targetLead.name }
+                : null
+            }
+            onClearMatch={() => {
+              if (targetLead) {
+                realtime.rollbackExistingLeadPrefill(targetLead.code);
+                realtime.dismissExistingLeadMatch(targetLead.code);
               }
-              disabled={realtime.status !== 'live'}
-              className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm disabled:bg-neutral-50 disabled:text-neutral-400"
-            />
+              setTargetLead(null);
+            }}
+            transcriptScrollRef={transcriptScrollRef}
+            photoPreviewUrl={photoPreviewUrl}
+            imageStatus={realtime.imageExtractStatus}
+          />
+        ) : (
+          <ReadyBody
+            targetLead={targetLead}
+            onClearTarget={() => setTargetLead(null)}
+            photoPreviewUrl={photoPreviewUrl}
+            onPhotoSelected={onPhotoSelected}
+            aiAssistEnabled={aiAssistEnabled}
+            setAiAssistEnabled={setAiAssistEnabled}
+            onPickLead={() => setActiveSheet('pick')}
+            error={error}
+            leadsUrl={leadsUrl}
+          />
+        )}
+      </div>
+
+      {/* ────── foot ────── */}
+      <div className="scr-foot">
+        {state === 'recording' ? (
+          <>
+            <div className="row gap-2 mb-2.5">
+              <label className="icon-btn cursor-pointer" title="Take photo">
+                <Camera size={18} />
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={onPhotoSelected}
+                  className="hidden"
+                />
+              </label>
+              <label className="icon-btn cursor-pointer" title="Browse photos">
+                <ImageIcon size={18} />
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={onPhotoSelected}
+                  className="hidden"
+                />
+              </label>
+              <div className="search-input" style={{ flex: 1, height: 44 }}>
+                <input
+                  type="text"
+                  value={textDraft}
+                  onChange={(e) => setTextDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && realtime.status === 'live' && textDraft.trim()) {
+                      e.preventDefault();
+                      realtime.sendText(textDraft);
+                      setTextDraft('');
+                    }
+                  }}
+                  placeholder="Type a note to the AI…"
+                  disabled={realtime.status !== 'live'}
+                />
+                <button
+                  type="button"
+                  className="text-ink"
+                  onClick={() => {
+                    if (realtime.status === 'live' && textDraft.trim()) {
+                      realtime.sendText(textDraft);
+                      setTextDraft('');
+                    }
+                  }}
+                  disabled={realtime.status !== 'live' || !textDraft.trim()}
+                  aria-label="Send"
+                >
+                  <Send size={16} className="disabled:opacity-30" />
+                </button>
+              </div>
+            </div>
+            <button type="button" className="cap-btn is-recording" onClick={submit}>
+              <span className="cap-ring" aria-hidden />
+              Stop &amp; save
+            </button>
             <button
               type="button"
-              onClick={() => {
-                if (realtime.status === 'live' && textDraft.trim()) {
-                  realtime.sendText(textDraft);
-                  setTextDraft('');
-                }
-              }}
-              disabled={realtime.status !== 'live' || !textDraft.trim()}
-              className="rounded-md bg-neutral-900 px-3 text-sm font-medium text-white disabled:opacity-30"
+              onClick={discardRecording}
+              className="mt-2 text-xs text-ink-4 hover:text-ink-3 mx-auto block underline"
             >
-              Send
+              Discard recording
             </button>
-          </div>
-        </div>
-
-        {/* AI assist toggle */}
-        <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-neutral-600">
-          <input
-            type="checkbox"
-            checked={aiAssistEnabled}
-            onChange={(e) => setAiAssistEnabled(e.target.checked)}
-            disabled={state === 'recording'}
-            className="mt-0.5 rounded border-neutral-300"
-          />
-          <span>
-            <span className="font-medium text-neutral-900">AI assist (alpha)</span> — Gemini Live
-            listens while you talk and asks short gap-filling questions out loud. Your raw recording
-            is still saved.
-            <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
-              direct API key auth
-            </span>
-          </span>
-        </label>
-
-        {/* Dev toggle — simulate offline mode for testing the Dexie queue. */}
-        <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-neutral-600">
-          <input
-            type="checkbox"
-            checked={simulatedOffline}
-            onChange={(e) => setSimulatedOffline(e.target.checked)}
-            className="mt-0.5 rounded border-neutral-300"
-          />
-          <span>
-            <span className="font-medium text-neutral-900">Simulate offline</span> — submit goes
-            to the local queue instead of the network. Useful for testing the offline outbox.
-            {simulatedOffline ? (
-              <span className="ml-1 rounded bg-orange-100 px-1.5 py-0.5 text-[10px] font-medium text-orange-800">
-                OFFLINE MODE
-              </span>
-            ) : null}
-          </span>
-        </label>
-
-        {/* Dev toggle — archive every WSS message to Dexie for inspection. */}
-        <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-neutral-600">
-          <input
-            type="checkbox"
-            checked={debugMode}
-            onChange={(e) => {
-              setDebugEnabled(e.target.checked);
-              setDebugMode(e.target.checked);
-            }}
-            className="mt-0.5 rounded border-neutral-300"
-          />
-          <span>
-            <span className="font-medium text-neutral-900">Debug mode</span> — archive raw
-            AI traffic locally.{' '}
-            <a href="/debug/log" className="underline">
-              view log
-            </a>
-            {debugMode ? (
-              <span className="ml-1 rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-800">
-                LOGGING
-              </span>
-            ) : null}
-          </span>
-        </label>
-
-        {realtime.status !== 'idle' && realtime.status !== 'closed' ? (
-          <div className="mt-3 space-y-2">
-            {/* Returning-lead match banner(s) — rep confirms or dismisses. */}
-            {realtime.existingLeadMatches.map((match) => {
-              const isConfirmed = confirmedExistingLeadCode === match.opportunityCode;
-              return (
-                <div
-                  key={match.opportunityCode}
-                  className={
-                    'rounded-md border p-2 text-xs ' +
-                    (isConfirmed
-                      ? 'border-emerald-300 bg-emerald-50'
-                      : 'border-sky-300 bg-sky-50')
-                  }
-                >
-                  <div className="font-medium text-neutral-900">
-                    {isConfirmed
-                      ? `Adding to ${match.opportunityCode}`
-                      : `Returning lead? ${match.opportunityCode}`}
-                  </div>
-                  <div className="mt-0.5 text-neutral-700">{match.reason}</div>
-                  {!isConfirmed ? (
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setConfirmedExistingLeadCode(match.opportunityCode)}
-                        className="rounded-md bg-emerald-600 px-2 py-1 text-xs font-medium text-white"
-                      >
-                        Yes, that's them
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          realtime.rollbackExistingLeadPrefill(match.opportunityCode);
-                          realtime.dismissExistingLeadMatch(match.opportunityCode);
-                        }}
-                        className="rounded-md border border-neutral-300 bg-white px-2 py-1 text-xs font-medium text-neutral-700"
-                      >
-                        No, different person
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setConfirmedExistingLeadCode(null);
-                        realtime.rollbackExistingLeadPrefill(match.opportunityCode);
-                        realtime.dismissExistingLeadMatch(match.opportunityCode);
-                      }}
-                      className="mt-2 text-xs text-neutral-500 underline"
-                    >
-                      undo
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Live checklist — fills in as the AI calls set_lead_field. */}
-            {realtime.requiredFields.length > 0 ? (
-              <div className="rounded-md border border-neutral-200 bg-white p-2 text-xs">
-                <div className="mb-1.5 text-[10px] uppercase tracking-wide text-neutral-500">
-                  Checklist
-                </div>
-                <ul className="space-y-1">
-                  {realtime.requiredFields.map((f) => {
-                    const captured = realtime.liveFields[f.key];
-                    const done = captured && captured.value;
-                    const lowConf =
-                      captured?.confidence != null && captured.confidence < 0.8;
-                    return (
-                      <li key={f.key} className="flex items-start gap-2">
-                        <span
-                          className={
-                            'mt-0.5 inline-flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border text-[10px] font-bold ' +
-                            (done
-                              ? lowConf
-                                ? 'border-amber-500 bg-amber-100 text-amber-700'
-                                : 'border-green-600 bg-green-600 text-white'
-                              : f.required
-                                ? 'border-neutral-400 text-neutral-400'
-                                : 'border-neutral-200 text-neutral-300')
-                          }
-                          aria-hidden
-                        >
-                          {done ? '✓' : f.required ? '★' : ''}
-                        </span>
-                        <span className="flex-1">
-                          <span className="text-neutral-700">{f.label}</span>
-                          {done ? (
-                            <span className="ml-1 font-medium text-neutral-900">
-                              · {captured.value}
-                            </span>
-                          ) : null}
-                          {lowConf && captured?.confidence != null ? (
-                            <span className="ml-1 text-[10px] text-amber-700">
-                              ({Math.round(captured.confidence * 100)}% — needs verify)
-                            </span>
-                          ) : null}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            ) : null}
-
-            {/* Live transcript bubble */}
-            <div
-              ref={transcriptScrollRef}
-              className="max-h-44 overflow-y-auto rounded-md border border-neutral-200 bg-neutral-50 p-2 text-xs"
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="cap-btn"
+              onClick={startRecording}
+              disabled={state === 'uploading'}
             >
-              <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-neutral-500">
-                <span
-                  className={
-                    'inline-block h-1.5 w-1.5 rounded-full ' +
-                    (realtime.status === 'live'
-                      ? 'animate-pulse bg-green-500'
-                      : realtime.status === 'error'
-                        ? 'bg-red-500'
-                        : realtime.status === 'connecting'
-                          ? 'animate-pulse bg-amber-500'
-                          : 'bg-neutral-300')
-                  }
-                />
-                AI {realtime.status}
-                {realtime.imageExtractStatus === 'extracting' ? (
-                  <span className="ml-2 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-800">
-                    Reading badge…
-                  </span>
-                ) : realtime.imageExtractStatus === 'error' ? (
-                  <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-800">
-                    Badge OCR failed
-                  </span>
-                ) : null}
-              </div>
-              {realtime.error ? (
-                <div className="mt-1 rounded bg-red-50 p-2 text-red-700">{realtime.error}</div>
-              ) : null}
-              {realtime.transcript.length === 0 ? (
-                <div className="mt-1 text-neutral-400">
-                  {realtime.status === 'connecting' ? 'Connecting to Gemini…' : 'Listening…'}
-                </div>
-              ) : (
-                <div className="mt-1 space-y-1">
-                  {realtime.transcript.map((t, i) => (
-                    <div key={i} className={t.role === 'assistant' ? 'text-blue-700' : 'text-neutral-700'}>
-                      <span className="font-medium">{t.role === 'assistant' ? 'AI' : 'You'}:</span> {t.text}
-                    </div>
-                  ))}
-                </div>
-              )}
+              <span className="cap-ring" aria-hidden />
+              {targetLead ? `Tap to add to ${targetLead.code}` : 'Tap to capture'}
+            </button>
+            <div className="t-tiny mt-3 text-center text-ink-4">
+              Audio always saved · offline-ready
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ────── sheets ────── */}
+      <ShowSwitcherSheet
+        open={activeSheet === 'switch'}
+        onClose={() => setActiveSheet(null)}
+        currentSlug={show.slug}
+        shows={shows}
+      />
+      <LeadPickerSheet
+        open={activeSheet === 'pick'}
+        onClose={() => setActiveSheet(null)}
+        showSlug={show.slug}
+        onPick={(lead: PickedLead) => {
+          setTargetLead({ code: lead.opportunityCode, name: lead.name ?? lead.opportunityCode });
+          setActiveSheet(null);
+        }}
+      />
+      <QueueSheet open={activeSheet === 'queue'} onClose={() => setActiveSheet(null)} />
+
+      {devMode ? (
+        <DevPanel
+          simulatedOffline={simulatedOffline}
+          setSimulatedOffline={setSimulatedOffline}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// ────── Ready body ──────
+
+function ReadyBody({
+  targetLead,
+  onClearTarget,
+  photoPreviewUrl,
+  onPhotoSelected,
+  aiAssistEnabled,
+  setAiAssistEnabled,
+  onPickLead,
+  error,
+  leadsUrl,
+}: {
+  targetLead: { code: string; name: string } | null;
+  onClearTarget: () => void;
+  photoPreviewUrl: string | null;
+  onPhotoSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  aiAssistEnabled: boolean;
+  setAiAssistEnabled: (v: boolean) => void;
+  onPickLead: () => void;
+  error: string | null;
+  leadsUrl: string;
+}) {
+  return (
+    <>
+      <div>
+        <div className="t-eyebrow">New capture</div>
+        <h1 className="t-title" style={{ marginTop: 6 }}>
+          {targetLead ? `Adding to ${targetLead.name}` : 'Ready when you are.'}
+        </h1>
+      </div>
+
+      {targetLead ? (
+        <div className="target-chip mt-4">
+          <div className="w-9 h-9 rounded-[10px] bg-white/20 flex items-center justify-center flex-shrink-0">
+            <User size={18} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="row gap-2 items-baseline">
+              <span className="lbl">Updating</span>
+              <span className="code-on-accent">{targetLead.code}</span>
+            </div>
+            <div className="nm whitespace-nowrap overflow-hidden text-ellipsis mt-0.5">
+              {targetLead.name}
             </div>
           </div>
-        ) : null}
-      </section>
+          <button type="button" className="close" onClick={onClearTarget} aria-label="Clear target">
+            <X size={14} />
+          </button>
+        </div>
+      ) : null}
 
-      {error ? <p className="text-sm text-red-600">{error}</p> : null}
+      <div className="card mt-4 p-0 overflow-hidden">
+        <div className="photo-thumb" style={{ borderRadius: 0, border: 'none' }}>
+          {photoPreviewUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={photoPreviewUrl}
+              alt="badge"
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+          ) : (
+            'BADGE PHOTO — TAP CAMERA'
+          )}
+        </div>
+        <div className="row p-3 gap-2">
+          <label className="icon-btn cursor-pointer flex-1">
+            <Camera size={18} />
+            <span className="ml-2 text-[13px] font-medium">Camera</span>
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={onPhotoSelected}
+              className="hidden"
+            />
+          </label>
+          <label className="icon-btn cursor-pointer flex-1">
+            <ImageIcon size={18} />
+            <span className="ml-2 text-[13px] font-medium">Library</span>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={onPhotoSelected}
+              className="hidden"
+            />
+          </label>
+        </div>
+      </div>
 
       <button
         type="button"
-        onClick={submit}
-        disabled={state === 'uploading' || (state !== 'recording' && !audioBlob && !photoFile)}
-        className="block w-full rounded-md bg-emerald-700 px-3 py-3 text-sm font-medium text-white disabled:opacity-50"
+        className="card mt-3 flex gap-3 items-center cursor-pointer text-left w-full"
+        style={{ borderColor: aiAssistEnabled ? 'var(--ink)' : 'var(--rule)' }}
+        onClick={() => setAiAssistEnabled(!aiAssistEnabled)}
       >
-        {state === 'uploading'
-          ? 'Uploading…'
-          : state === 'recording'
-            ? 'Stop & submit'
-            : 'Submit capture'}
+        <div
+          className="w-9 h-9 rounded-[10px] flex items-center justify-center flex-shrink-0"
+          style={{
+            background: aiAssistEnabled ? 'var(--ink)' : 'var(--paper-2)',
+            color: aiAssistEnabled ? 'var(--paper)' : 'var(--ink-3)',
+          }}
+        >
+          <Sparkles size={18} />
+        </div>
+        <div className="flex-1">
+          <div className="font-semibold text-sm">AI assist</div>
+          <div className="t-tiny mt-1">Asks short gap-filling questions while you talk.</div>
+        </div>
+        <Toggle on={aiAssistEnabled} />
       </button>
+
+      {!targetLead ? (
+        <button
+          type="button"
+          className="card-flat mt-3 flex items-center gap-3 text-left w-full border-0"
+          onClick={onPickLead}
+        >
+          <div className="w-9 h-9 rounded-[10px] bg-paper-3 text-ink-2 flex items-center justify-center flex-shrink-0">
+            <User size={18} />
+          </div>
+          <div className="flex-1">
+            <div className="font-semibold text-sm">Continue with an existing lead</div>
+            <div className="t-tiny mt-1">Skip the match — pick a lead to add this capture to.</div>
+          </div>
+          <ChevronRight size={16} className="text-ink-4" />
+        </button>
+      ) : null}
+
+      <div className="spacer" />
+
+      {error ? (
+        <div className="mt-4 rounded-[var(--r-3)] border border-warn bg-warn-wash px-3 py-2 text-sm text-warn">
+          {error}
+        </div>
+      ) : null}
+
+      <a
+        href={leadsUrl}
+        className="mt-6 t-meta self-center hover:text-ink-2 underline-offset-2 hover:underline"
+      >
+        <ArrowLeft size={12} className="inline -mt-px mr-1" />
+        See captured leads
+      </a>
+    </>
+  );
+}
+
+// ────── Live body ──────
+
+function LiveBody({
+  transcript,
+  liveFields,
+  requiredFields,
+  existingMatch,
+  onClearMatch,
+  transcriptScrollRef,
+  photoPreviewUrl,
+  imageStatus,
+}: {
+  transcript: ReturnType<typeof useRealtimeAssist>['transcript'];
+  liveFields: ReturnType<typeof useRealtimeAssist>['liveFields'];
+  requiredFields: ReturnType<typeof useRealtimeAssist>['requiredFields'];
+  existingMatch: { code: string; name: string } | null;
+  onClearMatch: () => void;
+  transcriptScrollRef: React.RefObject<HTMLDivElement | null>;
+  photoPreviewUrl: string | null;
+  imageStatus: ReturnType<typeof useRealtimeAssist>['imageExtractStatus'];
+}) {
+  const captured = requiredFields.filter((f) => liveFields[f.key]?.value).length;
+  const total = requiredFields.length || 1;
+  const progress = Math.min(100, Math.round((captured / total) * 100));
+
+  return (
+    <>
+      {existingMatch ? (
+        <div className="match-banner">
+          <div className="w-[38px] h-[38px] rounded-[10px] bg-accent text-accent-ink flex items-center justify-center flex-shrink-0">
+            <Sparkles size={18} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="label">Returning lead</div>
+            <div className="who whitespace-nowrap overflow-hidden text-ellipsis">
+              {existingMatch.name} <span className="code ml-1.5">{existingMatch.code}</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClearMatch}
+            className="flex-shrink-0 h-7 px-2.5 rounded-md text-xs font-medium whitespace-nowrap border border-rule-2 bg-surface text-ink-2"
+          >
+            not them
+          </button>
+        </div>
+      ) : null}
+
+      <div className="card mt-3 p-3 flex gap-3 items-center">
+        <div className="photo-thumb photo-thumb-sm flex-shrink-0">
+          {photoPreviewUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={photoPreviewUrl}
+              alt="badge"
+              className="absolute inset-0 w-full h-full object-cover rounded-[12px]"
+            />
+          ) : (
+            'BADGE'
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="row gap-1.5">
+            <span className="pill pill-ai">
+              <Sparkles size={12} />
+              {imageStatus === 'extracting' ? 'Reading badge…' : 'AI reading'}
+            </span>
+          </div>
+          <div className="t-meta mt-2 text-ink-2">
+            {captured} of {total} fields captured
+          </div>
+          <div className="h-1 bg-paper-3 rounded-full mt-1.5 overflow-hidden">
+            <div
+              className="h-full bg-ink rounded-full transition-all duration-300"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="card mt-3">
+        <div className="t-eyebrow mb-2.5">Captured</div>
+        <div className="check-list">
+          {requiredFields.map((f) => {
+            const captured = liveFields[f.key];
+            const isDone = captured && captured.value;
+            const lowConf =
+              captured?.confidence != null && captured.confidence < 0.8;
+            return (
+              <div
+                key={f.key}
+                className={`check-row ${isDone ? (lowConf ? 'is-warn' : 'is-done') : ''}`}
+              >
+                <div className="ck">
+                  {isDone ? <Check size={12} strokeWidth={2.5} /> : null}
+                </div>
+                <span className="label">{f.label}</span>
+                {isDone ? <span className="value">{captured.value}</span> : null}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div ref={transcriptScrollRef} className="tx-bubble mt-3 max-h-44 overflow-y-auto">
+        <div className="t-eyebrow text-live">Transcript</div>
+        {transcript.length === 0 ? (
+          <div className="t-tiny">Listening…</div>
+        ) : (
+          transcript.map((t, i) => (
+            <div
+              key={i}
+              className={`tx-line ${t.role === 'assistant' ? 'is-ai' : 'is-rep'}`}
+            >
+              <span className="who">{t.role === 'assistant' ? 'AI' : 'You'}</span>
+              <span className="text">{t.text}</span>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="spacer min-h-2" />
+    </>
+  );
+}
+
+function Toggle({ on }: { on: boolean }) {
+  return (
+    <div
+      className="w-[38px] h-[22px] rounded-[11px] relative transition-colors flex-shrink-0"
+      style={{ background: on ? 'var(--ink)' : 'var(--paper-3)' }}
+      aria-hidden
+    >
+      <div
+        className="absolute top-0.5 w-[18px] h-[18px] rounded-full bg-surface shadow transition-[left] duration-200"
+        style={{ left: on ? 18 : 2 }}
+      />
     </div>
   );
 }

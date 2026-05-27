@@ -1,13 +1,13 @@
 {
-  "name": "AI Capture",
-  "short_name": "AI Capture",
-  "description": "AI-native trade-show lead capture.",
+  "name": "red5 / capture",
+  "short_name": "red5 capture",
+  "description": "Trade-show lead capture · published by red5.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#ffffff",
-  "theme_color": "#171717",
+  "background_color": "#FAFAF6",
+  "theme_color": "#0E0E0C",
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },

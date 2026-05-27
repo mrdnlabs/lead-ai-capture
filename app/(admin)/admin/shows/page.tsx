@@ -40,12 +40,20 @@ export default async function ShowsAdminPage() {
                   : 'No lead form yet (captures will use default fields)'}
               </div>
             </div>
-            <a
-              href={`/admin/shows/${show.id}/lead-form`}
-              className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
-            >
-              {leadForm ? 'Edit lead form' : 'Set up lead form'}
-            </a>
+            <div className="row gap-2">
+              <a
+                href={`/admin/shows/${show.id}/team`}
+                className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
+              >
+                Team &amp; invites
+              </a>
+              <a
+                href={`/admin/shows/${show.id}/lead-form`}
+                className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
+              >
+                {leadForm ? 'Edit lead form' : 'Set up lead form'}
+              </a>
+            </div>
           </li>
         ))}
       </ul>

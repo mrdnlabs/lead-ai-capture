@@ -35,7 +35,7 @@ const FALLBACKS: Partial<Record<ProviderConfig['kind'], FallbackSpec>> = {
   },
   realtime: {
     provider: 'gemini',
-    model: 'gemini-2.5-flash-preview-native-audio-dialog',
+    model: 'gemini-2.5-flash-native-audio-latest',
     envVar: 'DEFAULT_GEMINI_API_KEY',
   },
 };

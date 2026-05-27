@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { enqueueCapture, uploadOne } from '@/lib/offline/queue';
+import { useRealtimeAssist } from '@/lib/realtime/useRealtimeAssist';
 
 type State = 'ready' | 'recording' | 'uploading' | 'done' | 'queued' | 'error';
 
@@ -33,11 +34,13 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [durationMs, setDurationMs] = useState<number>(0);
   const [elapsed, setElapsed] = useState<number>(0);
+  const [aiAssistEnabled, setAiAssistEnabled] = useState(false);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const startTimeRef = useRef<number>(0);
   const tickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const realtime = useRealtimeAssist();
 
   useEffect(() => {
     return () => {
@@ -66,6 +69,7 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
         setDurationMs(Date.now() - startTimeRef.current);
         for (const track of stream.getTracks()) track.stop();
         if (tickerRef.current) clearInterval(tickerRef.current);
+        realtime.stop();
         setState('ready');
       };
       rec.start();
@@ -73,6 +77,20 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
       startTimeRef.current = Date.now();
       setState('recording');
       tickerRef.current = setInterval(() => setElapsed(Date.now() - startTimeRef.current), 200);
+
+      // AI assist runs in parallel: clones the mic track so MediaRecorder + realtime are independent
+      if (aiAssistEnabled) {
+        const clonedTrack = stream.getAudioTracks()[0]?.clone();
+        if (clonedTrack) {
+          const realtimeStream = new MediaStream([clonedTrack]);
+          void realtime.start({
+            showSlug,
+            opportunityCode: '',
+            micStream: realtimeStream,
+            maxDurationSec: 120,
+          });
+        }
+      }
     } catch (e) {
       setError((e as Error).message);
       setState('error');
@@ -271,6 +289,55 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
             </button>
           )}
         </div>
+
+        {/* AI assist toggle */}
+        <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-neutral-600">
+          <input
+            type="checkbox"
+            checked={aiAssistEnabled}
+            onChange={(e) => setAiAssistEnabled(e.target.checked)}
+            disabled={state === 'recording'}
+            className="mt-0.5 rounded border-neutral-300"
+          />
+          <span>
+            <span className="font-medium text-neutral-900">AI assist (alpha)</span> — Gemini Live
+            listens while you talk and asks short gap-filling questions out loud. Your raw recording
+            is still saved.
+            <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+              direct API key auth
+            </span>
+          </span>
+        </label>
+
+        {realtime.status === 'live' || realtime.transcript.length > 0 ? (
+          <div className="mt-3 max-h-44 overflow-y-auto rounded-md border border-neutral-200 bg-neutral-50 p-2 text-xs">
+            <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-neutral-500">
+              <span
+                className={
+                  'inline-block h-1.5 w-1.5 rounded-full ' +
+                  (realtime.status === 'live'
+                    ? 'animate-pulse bg-green-500'
+                    : realtime.status === 'error'
+                      ? 'bg-red-500'
+                      : 'bg-neutral-300')
+                }
+              />
+              AI {realtime.status}
+              {realtime.error ? <span className="text-red-600">· {realtime.error}</span> : null}
+            </div>
+            {realtime.transcript.length === 0 ? (
+              <div className="text-neutral-400">Listening…</div>
+            ) : (
+              <div className="space-y-1">
+                {realtime.transcript.map((t, i) => (
+                  <div key={i} className={t.role === 'assistant' ? 'text-blue-700' : 'text-neutral-700'}>
+                    <span className="font-medium">{t.role === 'assistant' ? 'AI' : 'You'}:</span> {t.text}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
       </section>
 
       {error ? <p className="text-sm text-red-600">{error}</p> : null}

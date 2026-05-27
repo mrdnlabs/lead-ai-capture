@@ -145,10 +145,14 @@ export function useRealtimeAssist() {
       // Inform caller about the mixed stream (they'll feed it to MediaRecorder)
       args.onMixedStreamReady?.(mixed.stream);
 
-      // 3. Open WebSocket
-      // Gemini Live auth: ephemeral token goes as ?access_token=... query param
-      const url = `${tokenData.endpoint}?access_token=${encodeURIComponent(tokenData.token)}`;
+      // 3. Open WebSocket. Auth param depends on provider:
+      //   Gemini → ?key=API_KEY (direct API key — ephemeral tokens don't work browser-side)
+      //   OpenAI → ?access_token=ek_... (when we add OpenAI Realtime later)
+      const authParam = tokenData.provider === 'gemini' ? 'key' : 'access_token';
+      const url = `${tokenData.endpoint}?${authParam}=${encodeURIComponent(tokenData.token)}`;
       const ws = new WebSocket(url);
+      // Gemini sends server messages as binary (JSON-encoded UTF-8 bytes).
+      ws.binaryType = 'arraybuffer';
 
       const responseAudioBuffer: Int16Array[] = [];
       const ctx: RealtimeContext = {
@@ -240,6 +244,8 @@ interface ServerContent {
       text?: string;
     }>;
   };
+  inputTranscription?: InputTranscription;
+  outputTranscription?: InputTranscription;
   turnComplete?: boolean;
   interrupted?: boolean;
 }
@@ -249,35 +255,42 @@ interface InputTranscription {
   finished?: boolean;
 }
 
+function messageToText(data: MessageEvent['data']): string | null {
+  if (typeof data === 'string') return data;
+  if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
+  return null;
+}
+
 function handleServerMessage(
   e: MessageEvent,
   ctx: RealtimeContext,
   audioCtx: AudioContext,
   pushTranscript: (entry: TranscriptEntry) => void,
 ) {
+  const text = messageToText(e.data);
+  if (!text) return;
   let msg: {
     serverContent?: ServerContent;
-    inputTranscription?: InputTranscription;
-    outputTranscription?: InputTranscription;
     setupComplete?: object;
   };
   try {
-    msg = JSON.parse(typeof e.data === 'string' ? e.data : '');
+    msg = JSON.parse(text);
   } catch {
     return;
   }
 
-  if (msg.inputTranscription?.text) {
+  // Gemini Live nests inputTranscription/outputTranscription under serverContent
+  if (msg.serverContent?.inputTranscription?.text) {
     pushTranscript({
       role: 'user',
-      text: msg.inputTranscription.text,
+      text: msg.serverContent.inputTranscription.text,
       at: Date.now(),
     });
   }
-  if (msg.outputTranscription?.text) {
+  if (msg.serverContent?.outputTranscription?.text) {
     pushTranscript({
       role: 'assistant',
-      text: msg.outputTranscription.text,
+      text: msg.serverContent.outputTranscription.text,
       at: Date.now(),
     });
   }

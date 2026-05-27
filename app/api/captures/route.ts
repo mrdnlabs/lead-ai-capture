@@ -70,6 +70,18 @@ export async function POST(request: NextRequest): Promise<Response> {
     return NextResponse.json({ error: 'At least one of audio or photo is required' }, { status: 400 });
   }
 
+  // Optional live-conversation transcript captured from Gemini Live during recording
+  let realtimeTranscript: Array<{ role: 'user' | 'assistant'; text: string; at: number }> | null = null;
+  const transcriptField = form.get('realtimeTranscript');
+  if (typeof transcriptField === 'string' && transcriptField.length > 0) {
+    try {
+      const parsed = JSON.parse(transcriptField);
+      if (Array.isArray(parsed)) realtimeTranscript = parsed;
+    } catch {
+      /* malformed transcript — ignore, not fatal */
+    }
+  }
+
   const membership = await getShowMembership(rep.id, meta.showSlug);
   if (!membership) {
     return NextResponse.json({ error: 'Not a member of this show' }, { status: 403 });
@@ -167,7 +179,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       audioBlobKey,
       photoBlobKey,
       durationMs: meta.durationMs ?? null,
-      hadRealtimeAssist: false,
+      hadRealtimeAssist: realtimeTranscript !== null,
+      realtimeTranscript: realtimeTranscript ?? undefined,
       status: 'uploaded',
       clientCapturedAt: new Date(meta.clientCapturedAt),
     });

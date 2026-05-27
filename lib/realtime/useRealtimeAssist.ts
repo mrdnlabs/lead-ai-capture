@@ -187,7 +187,20 @@ export function useRealtimeAssist() {
       };
 
       ws.onmessage = (e) => handleServerMessage(e, ctx, audioCtx, (entry) => {
-        setTranscript((cur) => [...cur, entry]);
+        // Coalesce consecutive same-role chunks into one turn so the bubble
+        // shows "AI: full sentence" instead of one bubble per streamed word.
+        setTranscript((cur) => {
+          const last = cur[cur.length - 1];
+          if (last && last.role === entry.role) {
+            const merged: TranscriptEntry = {
+              role: entry.role,
+              text: last.text + entry.text,
+              at: last.at,
+            };
+            return [...cur.slice(0, -1), merged];
+          }
+          return [...cur, entry];
+        });
         args.onTranscript?.(entry);
       });
 

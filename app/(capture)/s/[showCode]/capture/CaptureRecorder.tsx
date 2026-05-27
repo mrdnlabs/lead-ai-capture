@@ -138,6 +138,9 @@ export function CaptureRecorder({ showSlug, leadsUrl }: Props) {
       durationMs: durationMs > 0 ? durationMs : undefined,
       photoBlob: photoFile ?? undefined,
       audioBlob: audioBlob ?? undefined,
+      // Preserve the live conversation transcript (rep + AI) so post-processing
+      // can extract from it even if audio quality is poor.
+      realtimeTranscript: realtime.transcript.length > 0 ? realtime.transcript : undefined,
     };
 
     // If clearly offline, skip the doomed network call and enqueue immediately.

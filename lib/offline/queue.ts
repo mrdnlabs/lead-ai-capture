@@ -10,6 +10,7 @@ export interface QueuedCaptureInput {
   durationMs?: number;
   photoBlob?: Blob;
   audioBlob?: Blob;
+  realtimeTranscript?: Array<{ role: 'user' | 'assistant'; text: string; at: number }>;
 }
 
 export async function enqueueCapture(input: QueuedCaptureInput): Promise<OutboxItem> {
@@ -62,6 +63,9 @@ export async function uploadOne(item: OutboxItem): Promise<void> {
       'audio',
       new File([item.audioBlob], `audio.${ext}`, { type: item.audioBlob.type || 'audio/webm' }),
     );
+  }
+  if (item.realtimeTranscript && item.realtimeTranscript.length > 0) {
+    form.set('realtimeTranscript', JSON.stringify(item.realtimeTranscript));
   }
   const res = await fetch('/api/captures', {
     method: 'POST',

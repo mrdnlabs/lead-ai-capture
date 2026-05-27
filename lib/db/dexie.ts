@@ -9,6 +9,7 @@ export interface OutboxItem {
   durationMs?: number;
   photoBlob?: Blob;
   audioBlob?: Blob;
+  realtimeTranscript?: Array<{ role: 'user' | 'assistant'; text: string; at: number }>;
   queuedAt: number;
   lastAttemptAt?: number;
   attempts: number;

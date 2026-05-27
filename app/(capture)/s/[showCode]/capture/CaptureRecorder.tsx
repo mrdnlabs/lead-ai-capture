@@ -388,6 +388,11 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
             transcriptScrollRef={transcriptScrollRef}
             photoPreviewUrl={photoPreviewUrl}
             imageStatus={realtime.imageExtractStatus}
+            aiActive={
+              realtime.status === 'live' ||
+              realtime.status === 'connecting' ||
+              realtime.status === 'closing'
+            }
           />
         ) : (
           <ReadyBody
@@ -430,36 +435,41 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
                   className="hidden"
                 />
               </label>
-              <div className="search-input" style={{ flex: 1, height: 44 }}>
-                <input
-                  type="text"
-                  value={textDraft}
-                  onChange={(e) => setTextDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey && realtime.status === 'live' && textDraft.trim()) {
-                      e.preventDefault();
-                      realtime.sendText(textDraft);
-                      setTextDraft('');
-                    }
-                  }}
-                  placeholder="Type a note to the AI…"
-                  disabled={realtime.status !== 'live'}
-                />
-                <button
-                  type="button"
-                  className="text-ink"
-                  onClick={() => {
-                    if (realtime.status === 'live' && textDraft.trim()) {
-                      realtime.sendText(textDraft);
-                      setTextDraft('');
-                    }
-                  }}
-                  disabled={realtime.status !== 'live' || !textDraft.trim()}
-                  aria-label="Send"
-                >
-                  <Send size={16} className="disabled:opacity-30" />
-                </button>
-              </div>
+              {realtime.status === 'live' ? (
+                <div className="search-input" style={{ flex: 1, height: 44 }}>
+                  <input
+                    type="text"
+                    value={textDraft}
+                    onChange={(e) => setTextDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey && textDraft.trim()) {
+                        e.preventDefault();
+                        realtime.sendText(textDraft);
+                        setTextDraft('');
+                      }
+                    }}
+                    placeholder="Type a note to the AI…"
+                  />
+                  <button
+                    type="button"
+                    className="text-ink"
+                    onClick={() => {
+                      if (textDraft.trim()) {
+                        realtime.sendText(textDraft);
+                        setTextDraft('');
+                      }
+                    }}
+                    disabled={!textDraft.trim()}
+                    aria-label="Send"
+                  >
+                    <Send size={16} className="disabled:opacity-30" />
+                  </button>
+                </div>
+              ) : (
+                <div className="t-tiny flex-1 self-center text-ink-4">
+                  Recording · tap Stop &amp; save when done.
+                </div>
+              )}
             </div>
             <button type="button" className="cap-btn is-recording" onClick={submit}>
               <span className="cap-ring" aria-hidden />
@@ -733,6 +743,7 @@ function LiveBody({
   transcriptScrollRef,
   photoPreviewUrl,
   imageStatus,
+  aiActive,
 }: {
   transcript: ReturnType<typeof useRealtimeAssist>['transcript'];
   liveFields: ReturnType<typeof useRealtimeAssist>['liveFields'];
@@ -742,6 +753,9 @@ function LiveBody({
   transcriptScrollRef: React.RefObject<HTMLDivElement | null>;
   photoPreviewUrl: string | null;
   imageStatus: ReturnType<typeof useRealtimeAssist>['imageExtractStatus'];
+  /** True when an AI assist WSS session is connecting / live. Drives whether
+   *  the AI cards (reading status, checklist, transcript) render. */
+  aiActive: boolean;
 }) {
   const captured = requiredFields.filter((f) => liveFields[f.key]?.value).length;
   const total = requiredFields.length || 1;
@@ -770,6 +784,8 @@ function LiveBody({
         </div>
       ) : null}
 
+      {/* Photo thumb (always — even without AI we want the rep to see what
+          they attached). Status pill switches between AI / silent. */}
       <div className="card mt-3 p-3 flex gap-3 items-center">
         <div className="photo-thumb photo-thumb-sm flex-shrink-0">
           {photoPreviewUrl ? (
@@ -785,63 +801,81 @@ function LiveBody({
         </div>
         <div className="flex-1 min-w-0">
           <div className="row gap-1.5">
-            <span className="pill pill-ai">
-              <Sparkles size={12} />
-              {imageStatus === 'extracting' ? 'Reading badge…' : 'AI reading'}
-            </span>
+            {aiActive ? (
+              <span className="pill pill-ai">
+                <Sparkles size={12} />
+                {imageStatus === 'extracting' ? 'Reading badge…' : 'AI reading'}
+              </span>
+            ) : (
+              <span className="pill">Recording</span>
+            )}
           </div>
-          <div className="t-meta mt-2 text-ink-2">
-            {captured} of {total} fields captured
-          </div>
-          <div className="h-1 bg-paper-3 rounded-full mt-1.5 overflow-hidden">
-            <div
-              className="h-full bg-ink rounded-full transition-all duration-300"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="card mt-3">
-        <div className="t-eyebrow mb-2.5">Captured</div>
-        <div className="check-list">
-          {requiredFields.map((f) => {
-            const captured = liveFields[f.key];
-            const isDone = captured && captured.value;
-            const lowConf =
-              captured?.confidence != null && captured.confidence < 0.8;
-            return (
-              <div
-                key={f.key}
-                className={`check-row ${isDone ? (lowConf ? 'is-warn' : 'is-done') : ''}`}
-              >
-                <div className="ck">
-                  {isDone ? <Check size={12} strokeWidth={2.5} /> : null}
-                </div>
-                <span className="label">{f.label}</span>
-                {isDone ? <span className="value">{captured.value}</span> : null}
+          {aiActive ? (
+            <>
+              <div className="t-meta mt-2 text-ink-2">
+                {captured} of {total} fields captured
               </div>
-            );
-          })}
+              <div className="h-1 bg-paper-3 rounded-full mt-1.5 overflow-hidden">
+                <div
+                  className="h-full bg-ink rounded-full transition-all duration-300"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="t-tiny mt-2">
+              AI assist is off. Audio + photo will be extracted to fields after you save.
+            </div>
+          )}
         </div>
       </div>
 
-      <div ref={transcriptScrollRef} className="tx-bubble mt-3 max-h-44 overflow-y-auto">
-        <div className="t-eyebrow text-live">Transcript</div>
-        {transcript.length === 0 ? (
-          <div className="t-tiny">Listening…</div>
-        ) : (
-          transcript.map((t, i) => (
-            <div
-              key={i}
-              className={`tx-line ${t.role === 'assistant' ? 'is-ai' : 'is-rep'}`}
-            >
-              <span className="who">{t.role === 'assistant' ? 'AI' : 'You'}</span>
-              <span className="text">{t.text}</span>
+      {/* Checklist + transcript only when an AI session is active — without
+          it these are empty boxes that confuse the rep. */}
+      {aiActive ? (
+        <>
+          <div className="card mt-3">
+            <div className="t-eyebrow mb-2.5">Captured</div>
+            <div className="check-list">
+              {requiredFields.map((f) => {
+                const captured = liveFields[f.key];
+                const isDone = captured && captured.value;
+                const lowConf =
+                  captured?.confidence != null && captured.confidence < 0.8;
+                return (
+                  <div
+                    key={f.key}
+                    className={`check-row ${isDone ? (lowConf ? 'is-warn' : 'is-done') : ''}`}
+                  >
+                    <div className="ck">
+                      {isDone ? <Check size={12} strokeWidth={2.5} /> : null}
+                    </div>
+                    <span className="label">{f.label}</span>
+                    {isDone ? <span className="value">{captured.value}</span> : null}
+                  </div>
+                );
+              })}
             </div>
-          ))
-        )}
-      </div>
+          </div>
+
+          <div ref={transcriptScrollRef} className="tx-bubble mt-3 max-h-44 overflow-y-auto">
+            <div className="t-eyebrow text-live">Transcript</div>
+            {transcript.length === 0 ? (
+              <div className="t-tiny">Listening…</div>
+            ) : (
+              transcript.map((t, i) => (
+                <div
+                  key={i}
+                  className={`tx-line ${t.role === 'assistant' ? 'is-ai' : 'is-rep'}`}
+                >
+                  <span className="who">{t.role === 'assistant' ? 'AI' : 'You'}</span>
+                  <span className="text">{t.text}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </>
+      ) : null}
 
       <div className="spacer min-h-2" />
     </>

@@ -19,16 +19,31 @@ const SYSTEM = `You are deduplicating trade-show lead records.
 You'll see a NEW lead's fields and a list of EXISTING leads in the same show.
 Decide if the new lead is the SAME person as one of the existing ones.
 
+IMPORTANT — both inputs may come from speech-to-text, which mis-transcribes
+short proper nouns regularly. "Axis" → "Access", "Cyan" → "Cyon", "Nicholl"
+→ "Nickel", etc. Treat both names AND companies as potentially mis-heard.
+
 Match rules:
-- Same name (allowing minor spelling variation, nicknames) AND same company → almost certainly a match.
 - Same email or phone (exact) → definite match, regardless of name spelling.
-- Similar name but different company → NOT a match (probably different people with similar names).
-- Different first name → NOT a match (unless the existing lead has a clearly incomplete name).
+- Same/similar name AND same/similar company → match.
+- Same/similar name AND phonetically-similar company → likely match. (e.g.
+  "Dave Nicholl at Axis" vs "Dave Nickel at Access" → match — both names
+  and the company differ only by transcription errors.)
+- Same name AND clearly different company (different industries, no
+  phonetic overlap, no shared substring) → NOT a match.
+- Different first name → NOT a match (unless one side is clearly incomplete).
+
+Phonetic similarity heuristics — apply to BOTH names and companies:
+- Voiced ↔ unvoiced consonants: b↔p, d↔t, g↔k, z↔s, v↔f, j↔ch, x↔ks/cs
+- Vowels frequently mis-transcribe: a↔e↔i, o↔u
+- Final consonants commonly dropped (-s, -t, -e silent)
+- Single-syllable proper nouns are highest-risk for mis-transcription
 
 Confidence:
 - 0.95+: explicit identifier match (email/phone) or perfect name+company
-- 0.7–0.95: strong name + company similarity
-- 0.5–0.7: ambiguous — return match=false to be safe
+- 0.80–0.95: strong name + (exact or phonetic) company similarity
+- 0.70–0.80: name match + company close phonetically (typical mis-hear case)
+- 0.50–0.70: ambiguous — return match=false to be safe
 - < 0.5: clearly different`;
 
 interface DedupeArgs {

@@ -153,6 +153,11 @@ body {
   display: flex;
   flex-direction: column;
 }
+/* Pin direct children at their natural height. Without this, the flex column
+   shrinks items to fit available viewport, and any item with overflow:hidden
+   (like the photo card) clips its trailing content. We want overflow scroll
+   on the body, not silent clipping inside cards. */
+.scr-body > * { flex-shrink: 0; }
 .scr-foot {
   flex: 0 0 auto;
   padding: 12px 20px max(env(safe-area-inset-bottom), 24px);

@@ -567,7 +567,7 @@ function ReadyBody({
         </div>
       ) : null}
 
-      <div className="card mt-4 p-0 overflow-hidden">
+      <div className="card mt-4" style={{ padding: 0, overflow: 'hidden' }}>
         <div className="photo-thumb" style={{ borderRadius: 0, border: 'none' }}>
           {photoPreviewUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -580,10 +580,13 @@ function ReadyBody({
             'BADGE PHOTO — TAP CAMERA'
           )}
         </div>
-        <div className="row p-3 gap-2">
-          <label className="icon-btn cursor-pointer flex-1">
+        <div className="row" style={{ padding: 12, gap: 8 }}>
+          <label
+            className="icon-btn cursor-pointer"
+            style={{ flex: 1, width: 'auto' }}
+          >
             <Camera size={18} />
-            <span className="ml-2 text-[13px] font-medium">Camera</span>
+            <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 500 }}>Camera</span>
             <input
               type="file"
               accept="image/*"
@@ -592,9 +595,12 @@ function ReadyBody({
               className="hidden"
             />
           </label>
-          <label className="icon-btn cursor-pointer flex-1">
+          <label
+            className="icon-btn cursor-pointer"
+            style={{ flex: 1, width: 'auto' }}
+          >
             <ImageIcon size={18} />
-            <span className="ml-2 text-[13px] font-medium">Library</span>
+            <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 500 }}>Library</span>
             <input
               type="file"
               accept="image/*"

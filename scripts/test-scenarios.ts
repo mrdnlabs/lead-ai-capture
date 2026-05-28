@@ -524,47 +524,65 @@ function checkMatchOverlap(
       reason: `No lead with opportunityCode "${opportunityCode}" in the EXISTING LEADS list you were given.`,
     };
   }
-  const candidateTokens: string[] = [];
-  for (const k of ['name', 'first_name', 'last_name', 'company']) {
-    const v = lead.knownFields[k];
+  const tokenize = (v: string | undefined): string[] => {
+    const out: string[] = [];
     if (typeof v === 'string') {
       for (const tok of v.toLowerCase().split(/[^a-z0-9]+/)) {
-        if (tok.length >= 2) candidateTokens.push(tok);
+        if (tok.length >= 2) out.push(tok);
       }
     }
-  }
+    return out;
+  };
   const repTokens = new Set<string>();
   for (const [, v] of Object.entries(ctx.liveFields)) {
-    if (v.value) {
-      for (const tok of v.value.toLowerCase().split(/[^a-z0-9]+/)) {
-        if (tok.length >= 2) repTokens.add(tok);
-      }
-    }
+    if (v.value) for (const tok of tokenize(v.value)) repTokens.add(tok);
   }
   for (const tok of ctx.repTranscript.toLowerCase().split(/[^a-z0-9]+/)) {
     if (tok.length >= 3) repTokens.add(tok);
   }
-  for (const tok of candidateTokens) {
-    if (repTokens.has(tok)) return { accepted: true };
-    for (const candidate of repTokens) {
-      if (
-        tok.length >= 4 &&
-        candidate.length >= 4 &&
-        (tok.startsWith(candidate.slice(0, 4)) || candidate.startsWith(tok.slice(0, 4)))
-      ) {
-        return { accepted: true };
+  const anyOverlap = (cands: string[]): boolean => {
+    for (const tok of cands) {
+      if (repTokens.has(tok)) return true;
+      for (const candidate of repTokens) {
+        if (
+          tok.length >= 4 &&
+          candidate.length >= 4 &&
+          (tok.startsWith(candidate.slice(0, 4)) || candidate.startsWith(tok.slice(0, 4)))
+        ) {
+          return true;
+        }
       }
     }
+    return false;
+  };
+  // Email/phone exact match bypasses the name guard.
+  const candEmail = lead.knownFields.email?.toLowerCase();
+  const candPhone = lead.knownFields.phone?.toLowerCase();
+  if ((candEmail && repTokens.has(candEmail)) || (candPhone && repTokens.has(candPhone))) {
+    return { accepted: true };
   }
-  if (candidateTokens.length === 0) return { accepted: true }; // no signal to compare against — let it through
-  const candidateName =
+  const firstNameTokens = tokenize(lead.knownFields.first_name);
+  const lastNameTokens = tokenize(lead.knownFields.last_name);
+  const fullNameTokens = tokenize(lead.knownFields.name);
+  const nameTokens = [...firstNameTokens, ...lastNameTokens, ...fullNameTokens];
+  const candidateLabel =
     lead.knownFields.name ||
     [lead.knownFields.first_name, lead.knownFields.last_name].filter(Boolean).join(' ') ||
     opportunityCode;
-  return {
-    accepted: false,
-    reason: `Match rejected: candidate "${candidateName}" shares no name token with anything the rep has said. Do not call match_existing_lead again for this opportunity.`,
-  };
+  if (nameTokens.length === 0) return { accepted: true }; // unnamed lead — let it through, can't compare
+  if (!anyOverlap(nameTokens)) {
+    return {
+      accepted: false,
+      reason: `Match rejected: candidate "${candidateLabel}" shares no NAME token with anything the rep has said. Company match alone is not enough.`,
+    };
+  }
+  if (lastNameTokens.length > 0 && !anyOverlap(lastNameTokens)) {
+    return {
+      accepted: false,
+      reason: `Match rejected: candidate last name "${lead.knownFields.last_name}" does not match anything the rep said. Different last name = different person, even if first names match.`,
+    };
+  }
+  return { accepted: true };
 }
 
 async function sendTurnAndAwaitComplete(

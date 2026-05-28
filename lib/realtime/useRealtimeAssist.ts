@@ -527,19 +527,38 @@ export function useRealtimeAssist() {
               };
             }
 
-            // Server-side overlap guard: the candidate must share at least one
-            // name token (first or last, substring or phonetic) with what's
-            // been captured live OR with what the rep has said in the
-            // transcript. Catches grasp-at-straws matches where the AI picks a
-            // lead that has zero textual overlap with the rep's input.
-            const candidateTokens = collectNameTokens(known);
+            // Server-side overlap guard. Two checks:
+            //   (a) at least one of the candidate's NAME tokens (first or
+            //       last) must appear in the rep transcript / liveFields —
+            //       substring or 4-char phonetic prefix. Company tokens
+            //       alone do NOT count.
+            //   (b) if the candidate has a last_name, the rep input must
+            //       include at least one token that matches IT specifically
+            //       (substring or phonetic). Catches the "same first name,
+            //       different last name" overreach.
+            // Email/phone exact-match candidates bypass the guard — they're
+            // unique identifiers and override name signals.
             const repTokens = collectTokensFromTranscript();
-            const overlap = anyTokenOverlap(candidateTokens, repTokens);
-            if (!overlap && candidateTokens.length > 0) {
-              return {
-                accepted: false,
-                rejectReason: `Match rejected: candidate "${known.name ?? known.first_name ?? known.last_name ?? opportunityCode}" shares no name token with anything the rep has said. Do not call match_existing_lead again for this opportunity.`,
-              };
+            const repHasMatchingIdentifier =
+              (typeof known.email === 'string' && known.email.length > 0 && repTokens.has(known.email.toLowerCase())) ||
+              (typeof known.phone === 'string' && known.phone.length > 0 && repTokens.has(known.phone.toLowerCase()));
+            if (!repHasMatchingIdentifier) {
+              const firstNameTokens = nameTokensOnly(known.first_name);
+              const lastNameTokens = nameTokensOnly(known.last_name);
+              const fullNameTokens = nameTokensOnly(known.name);
+              const nameTokens = [...firstNameTokens, ...lastNameTokens, ...fullNameTokens];
+              if (nameTokens.length > 0 && !anyTokenOverlap(nameTokens, repTokens)) {
+                return {
+                  accepted: false,
+                  rejectReason: `Match rejected: candidate "${known.name ?? known.first_name ?? opportunityCode}" shares no NAME token with anything the rep has said. Company match alone is not enough — wait for the rep to give a name that overlaps.`,
+                };
+              }
+              if (lastNameTokens.length > 0 && !anyTokenOverlap(lastNameTokens, repTokens)) {
+                return {
+                  accepted: false,
+                  rejectReason: `Match rejected: candidate last name "${known.last_name}" does not match anything the rep said. Different last name = different person, even if first names match.`,
+                };
+              }
             }
 
             const name =
@@ -565,14 +584,11 @@ export function useRealtimeAssist() {
             return { accepted: true };
 
             // Inline helpers — kept close to use site for readability.
-            function collectNameTokens(fields: Record<string, string>): string[] {
+            function nameTokensOnly(v: string | undefined): string[] {
               const out: string[] = [];
-              for (const k of ['name', 'first_name', 'last_name', 'company']) {
-                const v = fields[k];
-                if (typeof v === 'string') {
-                  for (const tok of v.toLowerCase().split(/[^a-z0-9]+/)) {
-                    if (tok.length >= 2) out.push(tok);
-                  }
+              if (typeof v === 'string') {
+                for (const tok of v.toLowerCase().split(/[^a-z0-9]+/)) {
+                  if (tok.length >= 2) out.push(tok);
                 }
               }
               return out;

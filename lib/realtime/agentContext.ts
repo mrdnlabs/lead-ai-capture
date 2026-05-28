@@ -168,9 +168,11 @@ EXISTING LEADS at this show (leads often return and talk to different reps — w
 ${formatRecentLeads(args.recentLeads)}
 
 CRITICAL: USE THE set_lead_field TOOL whenever the rep tells you a value.
-- Call \`set_lead_field({key, value, confidence})\` immediately as soon as the rep states a piece of info.
+- Call \`set_lead_field({key, value, confidence})\` immediately as soon as the rep states (or confirms) a piece of info.
 - ALWAYS call it for: name, email, company, title, phone, and any custom qualifying field.
 - The checklist UI updates live from these tool calls — that's how the rep knows what's been captured.
+- **COMMIT BEFORE ACKNOWLEDGING:** when the rep confirms a spelled-out value (e.g. they say "yes, that's o-l-i-v-i-a at fjord dot com"), emit set_lead_field IN THE SAME TURN as your acknowledgment. Do NOT acknowledge "got it" and then move on without the tool call — the value won't actually be saved.
+- **CORRECTIONS BEAT STORED VALUES:** if the rep gives a value that differs from what's in CURRENT KNOWN INFO or in a matched existing-lead's data (e.g. badge said "Tatem", rep says "Tatum, T-A-T-U-M"), call set_lead_field with the REP's value at confidence 1.0. Your job is to update the record, not to defend the existing one. Stored data is not authoritative when the rep speaks against it.
 
 RECOGNIZING RETURNING LEADS (this is a GOOD thing — repeat visits mean engagement):
 - Call \`match_existing_lead({opportunityCode, reason, confidence})\` ONLY when you have enough identifying info to match safely. Re-evaluate after every new piece of information the rep gives you — the right moment to match might be turn 1 or turn 5.
@@ -214,8 +216,11 @@ SPELLING / ACCURACY:
 
 CONVERSATION STYLE:
 - Speak briefly. One short question at a time.
-- If the rep says "done", "that's it", "all set", "nothing else", "wrap it up", etc., call \`end_conversation({reason})\` immediately. This closes the session and submits the capture — the rep does not have to tap anything else.
-- Don't keep asking once they're clearly finished. One follow-up at most ("anything else before we wrap?"), then end.
+- **BEFORE end_conversation, always recap.** When the rep signals they're done ("done", "that's it", "all set", "nothing else", "wrap it up"), do NOT immediately call end_conversation. First do TWO things:
+    1. Make sure every value the rep mentioned has actually been committed via set_lead_field — if the rep said something you didn't yet tool-call, do it now.
+    2. State the captured fields back in one short sentence: "Got Olivia Park, head of data engineering at Fjord Analytics, olivia@fjord-analytics.com — anything to add or correct?"
+  Only after the rep says "no" / "that's right" / "wrap up" again, call end_conversation. This catches the case where you verbally acknowledged a value but never set the tool.
+- Don't keep asking once they're clearly finished. The recap is ONE pass — don't loop.
 - If the rep pauses >5 seconds, stay quiet — they may be still talking to the actual lead at the booth.
 - Never invent details. Only capture what the rep actually says.
 - Hard stop after 90 seconds even without "done".
@@ -267,7 +272,7 @@ export function buildToolDeclarations(
     {
       name: 'match_existing_lead',
       description:
-        'Call when you have BOTH first AND last name (or a unique identifier like email/phone) and they match an EXISTING LEAD. Do NOT call on first-name-only or last-name-only matches — ask the rep for more info first. Set confidence based on the match strength (see system prompt).',
+        'Call when you have BOTH first AND last name (or a unique identifier like email/phone) and they match an EXISTING LEAD. REQUIRED preconditions: (a) the candidate lead shares at least one name token (first or last) with what the rep said — substring or phonetic match; AND (b) if you have a company from the rep, it overlaps with the candidate\'s company (exact, substring, or phonetic). If NEITHER name component matches, DO NOT call this tool — even at low confidence. The server will reject the call and tell you to stop.',
       parameters: {
         type: 'object',
         properties: {
@@ -296,7 +301,7 @@ export function buildToolDeclarations(
     {
       name: 'end_conversation',
       description:
-        'Call when the rep has clearly indicated they are done ("done", "that\'s it", "all set", "nothing else", etc.). Closes the live AI session AND submits the capture — the rep does not have to tap anything else.',
+        'Call ONLY after (1) you have committed every value the rep mentioned via set_lead_field, AND (2) you have recapped the captured fields back to the rep and they confirmed nothing else to add. Do NOT call this immediately when the rep first says "done" — recap first. Closes the live AI session AND submits the capture.',
       parameters: {
         type: 'object',
         properties: {

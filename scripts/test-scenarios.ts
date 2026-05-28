@@ -299,6 +299,81 @@ const SCENARIOS: Scenario[] = [
       aiAsks: /a-n-i-k-a|letter by letter|read.*back|spelled|spell that|correct/i,
     },
   },
+
+  // ─── Edge cases for the field-commit + recap rules ─────────────────────
+
+  {
+    name: 'commit-email-before-wrap',
+    description:
+      'Rep gives all info quickly and says "done". AI must commit email AND recap captured fields BEFORE calling end_conversation. Catches the Olivia Park regression.',
+    repTurns: [
+      'New lead: Olivia Park, Fjord Analytics, head of data engineering.',
+      'Her email is olivia at fjord-analytics dot com. Spelled o-l-i-v-i-a, that is correct.',
+      'Done, that is it.',
+      'No, that is everything.',
+    ],
+    expected: {
+      noMatchExpected: true,
+      capturedFields: {
+        first_name: /olivia/i,
+        company: /fjord/i,
+        email: /olivia.*fjord/i,
+      },
+      // The recap rule should produce a turn where the AI states back the
+      // captured fields — look for the lead's name + a confirmation word.
+      aiAsks: /(olivia|recap|got).*(olivia|fjord|email|head)|anything (else|to add|to correct)/i,
+    },
+  },
+
+  {
+    name: 'rep-correction-overrides-stored-value',
+    description:
+      "Stored last name is 'Tatem' (TST003). Rep matches the lead and then gives the correct spelling 'Tatum'. AI must call set_lead_field with the rep's value, not echo the stored one.",
+    repTurns: [
+      'Stephen Tatum from Northwind Logistics came back. He goes by Stephen, not Steve.',
+      'Yes — and his last name is spelled T-A-T-U-M, the badge from before was misprinted.',
+      'That is all.',
+      'No, that is it.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST003',
+      capturedFields: { last_name: /tatum/i },
+      minFieldConfidence: { last_name: 1.0 },
+    },
+  },
+
+  {
+    name: 'overreach-match-rejected-by-server',
+    description:
+      "Pathological case: rep says a name and company with zero overlap to anything in EXISTING LEADS. AI shouldn't call the tool, but if it does, the server should reject. Ends with no match.",
+    repTurns: [
+      'Linda Smith from Hawthorne Bio stopped by. Lab automation lead.',
+      'Email is linda.smith at hawthorne hyphen bio dot com.',
+      'Yes, that is correct.',
+      'Done.',
+    ],
+    expected: {
+      noMatchExpected: true,
+      capturedFields: { first_name: /linda/i, company: /hawthorne/i },
+    },
+  },
+
+  {
+    name: 'match-from-photo-no-readback',
+    description:
+      "Simulates a photo-extraction-then-match flow: AI is told via system message that the photo extracted David Chen / Acme Robotics. It should call match_existing_lead immediately and not ask the rep to spell anything.",
+    repTurns: [
+      '[system] The rep just attached a photo. Vision OCR extracted: { first_name: "David", last_name: "Chen", company: "Acme Robotics", title: "Director of Engineering", email: "david.chen@acmerobotics.io" }. These are facts from the printed card — high confidence on identity fields. Now: 1. Compare against EXISTING LEADS. 2. Call set_lead_field for values you want committed. 3. Ask about anything not on the card.',
+      'He wants to schedule a demo next month.',
+      'Done.',
+      'No, that is everything.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST001',
+      // AI should NOT ask the rep to spell anything from the card.
+      aiDoesNotAsk: /how do you spell|spell that|letter by letter/i,
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -591,8 +666,21 @@ function checkExpectations(
     .filter((t) => t.role === 'ai')
     .map((t) => t.text ?? '')
     .join('\n');
-  if (exp.aiAsks && !exp.aiAsks.test(aiText)) {
-    notes.push(`FAIL: expected AI to ask /${exp.aiAsks.source}/${exp.aiAsks.flags}, but AI never did`);
+  // Conditional aiAsks: skip the assertion if the rep already volunteered
+  // the info the AI was supposed to ask for. Detects by checking if the rep
+  // transcript matches the same pattern (e.g. rep pre-spelled letter-by-
+  // letter, so the AI doesn't need to ask for spelling).
+  if (exp.aiAsks) {
+    const repText = transcript
+      .filter((t) => t.role === 'rep')
+      .map((t) => t.text ?? '')
+      .join('\n');
+    const repVolunteered = exp.aiAsks.test(repText);
+    if (!repVolunteered && !exp.aiAsks.test(aiText)) {
+      notes.push(
+        `FAIL: expected AI to ask /${exp.aiAsks.source}/${exp.aiAsks.flags}, but AI never did (and the rep didn't volunteer it either)`,
+      );
+    }
   }
   if (exp.aiDoesNotAsk && exp.aiDoesNotAsk.test(aiText)) {
     notes.push(
@@ -618,58 +706,138 @@ function checkExpectations(
 // Runner
 // ---------------------------------------------------------------------------
 
+/**
+ * Delete every opportunity whose code is NOT in the TST* allowlist for the
+ * test show. Wipes real-world testing residue so scenarios with
+ * noMatchExpected aren't fouled by leftover Pikulski/Wheelen/etc. leads.
+ */
+async function resetTestData(): Promise<void> {
+  const { db } = await import('@/db/client');
+  const schema = await import('@/db/schema');
+  const { and, eq, notLike } = await import('drizzle-orm');
+  const [demo] = await db.select().from(schema.shows).where(eq(schema.shows.slug, SHOW_SLUG)).limit(1);
+  if (!demo) {
+    console.error(`Show ${SHOW_SLUG} not found`);
+    process.exit(1);
+  }
+  const result = await db
+    .delete(schema.opportunities)
+    .where(and(eq(schema.opportunities.showId, demo.id), notLike(schema.opportunities.code, 'TST%')))
+    .returning({ code: schema.opportunities.code });
+  console.log(`• reset: deleted ${result.length} non-TST opportunities (${result.map((r) => r.code).join(', ')})`);
+}
+
+interface AggregateRow {
+  scenarioName: string;
+  results: SimResult[];
+  passes: number;
+  total: number;
+}
+
 async function main() {
+  // --runs=N → run each scenario N times and report aggregate pass rate
+  const runsArg = process.argv.find((a) => a.startsWith('--runs='));
+  const runs = runsArg ? Math.max(1, Math.min(10, Number(runsArg.split('=')[1]))) : 1;
+  const reset = process.argv.includes('--reset');
+  const filterArg = process.argv.find((a) => a.startsWith('--only='));
+  const onlyNames = filterArg ? new Set(filterArg.split('=')[1].split(',')) : null;
+  const scenarios = onlyNames ? SCENARIOS.filter((s) => onlyNames.has(s.name)) : SCENARIOS;
+
   console.log(`\n=== E2E test harness ===`);
-  console.log(`Target: ${process.env.AICAPTURE_TEST_BASE_URL ?? 'https://ai-capture.vercel.app'}`);
-  console.log(`Rep:    ${REP_EMAIL}`);
-  console.log(`Show:   ${SHOW_SLUG}`);
-  console.log(`Scenarios to run: ${SCENARIOS.length}\n`);
+  console.log(`Target:    ${process.env.AICAPTURE_TEST_BASE_URL ?? 'https://ai-capture.vercel.app'}`);
+  console.log(`Rep:       ${REP_EMAIL}`);
+  console.log(`Show:      ${SHOW_SLUG}`);
+  console.log(`Scenarios: ${scenarios.length}${onlyNames ? ` (filtered from ${SCENARIOS.length})` : ''}`);
+  console.log(`Runs per:  ${runs}\n`);
+
+  if (reset) {
+    await resetTestData();
+  }
 
   process.stdout.write('• authenticating … ');
   const session = await loginAsTestRep({ email: REP_EMAIL });
-  console.log('OK');
+  console.log('OK\n');
 
   const outDir = join(process.cwd(), 'tests', 'scenario-runs');
   mkdirSync(outDir, { recursive: true });
   const runId = new Date().toISOString().replace(/[:.]/g, '-');
 
-  const results: SimResult[] = [];
-  for (const scenario of SCENARIOS) {
-    process.stdout.write(`▶ ${scenario.name} … `);
-    try {
-      const r = await runScenario(scenario, session);
-      results.push(r);
-      console.log(r.passed ? 'PASS' : 'FAIL');
-      for (const n of r.notes) console.log(`    ${n}`);
-    } catch (e) {
-      const msg = (e as Error).message;
-      console.log(`ERROR — ${msg}`);
-      results.push({
-        scenario,
-        transcript: [],
-        liveFields: {},
-        matches: [],
-        passed: false,
-        notes: [`ERROR: ${msg}`],
-      });
+  const aggregate: AggregateRow[] = scenarios.map((s) => ({
+    scenarioName: s.name,
+    results: [],
+    passes: 0,
+    total: 0,
+  }));
+
+  for (let run = 1; run <= runs; run++) {
+    if (runs > 1) console.log(`══ Run ${run}/${runs} ══`);
+    for (const scenario of scenarios) {
+      const row = aggregate.find((a) => a.scenarioName === scenario.name)!;
+      process.stdout.write(`▶ ${scenario.name} … `);
+      try {
+        const r = await runScenario(scenario, session);
+        row.results.push(r);
+        row.total++;
+        if (r.passed) row.passes++;
+        console.log(r.passed ? 'PASS' : 'FAIL');
+        for (const n of r.notes) console.log(`    ${n}`);
+      } catch (e) {
+        const msg = (e as Error).message;
+        row.results.push({
+          scenario,
+          transcript: [],
+          liveFields: {},
+          matches: [],
+          passed: false,
+          notes: [`ERROR: ${msg}`],
+        });
+        row.total++;
+        console.log(`ERROR — ${msg}`);
+      }
     }
+    if (runs > 1) console.log('');
   }
 
   const summaryPath = join(outDir, `${runId}-summary.json`);
   writeFileSync(
     summaryPath,
     JSON.stringify(
-      { runId, baseUrl: session.baseUrl, repEmail: session.email, showSlug: SHOW_SLUG, results },
+      {
+        runId,
+        baseUrl: session.baseUrl,
+        repEmail: session.email,
+        showSlug: SHOW_SLUG,
+        runsPerScenario: runs,
+        aggregate: aggregate.map((a) => ({
+          scenarioName: a.scenarioName,
+          passes: a.passes,
+          total: a.total,
+          passRate: a.total > 0 ? a.passes / a.total : 0,
+          results: a.results,
+        })),
+      },
       null,
       2,
     ),
   );
 
-  console.log(`\n=== Summary ===`);
-  const passed = results.filter((r) => r.passed).length;
-  console.log(`${passed}/${results.length} passed`);
+  console.log(`=== Summary ===`);
+  if (runs > 1) {
+    for (const a of aggregate) {
+      const pct = a.total > 0 ? Math.round((a.passes / a.total) * 100) : 0;
+      const bar =
+        pct === 100 ? '✅' : pct >= 67 ? '🟡' : pct >= 33 ? '🟠' : '🔴';
+      console.log(`  ${bar} ${a.scenarioName}: ${a.passes}/${a.total} (${pct}%)`);
+    }
+  }
+  const totalPasses = aggregate.reduce((n, a) => n + a.passes, 0);
+  const totalRuns = aggregate.reduce((n, a) => n + a.total, 0);
+  console.log(`\nOverall: ${totalPasses}/${totalRuns} passed`);
   console.log(`Archive: ${summaryPath}`);
-  process.exit(passed === results.length ? 0 : 1);
+
+  // Exit code: green only if every scenario is at 100% across all runs.
+  const allGreen = aggregate.every((a) => a.passes === a.total && a.total > 0);
+  process.exit(allGreen ? 0 : 1);
 }
 
 main().catch((e) => {

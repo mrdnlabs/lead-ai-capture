@@ -97,10 +97,39 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
   const [show] = await db.select().from(shows).where(eq(shows.id, capture.showId)).limit(1);
   if (!show) {
     console.warn(`[processCapture] show ${capture.showId} not found`);
+    // Mark as failed so it doesn't linger in `queued`/`uploaded` forever.
+    await db.update(captures).set({ status: 'failed' }).where(eq(captures.id, captureId));
     return;
   }
 
   await db.update(captures).set({ status: 'processing' }).where(eq(captures.id, captureId));
+
+  // Wrap the rest in try/finally so the row always lands at processed OR
+  // failed — never stuck in `processing` because of a mid-pipeline throw.
+  try {
+    await runPipeline(capture, show, captureId);
+    await db.update(captures).set({ status: 'processed' }).where(eq(captures.id, captureId));
+  } catch (e) {
+    console.error(`[processCapture] capture ${captureId} failed mid-pipeline:`, (e as Error).message);
+    try {
+      await db.update(captures).set({ status: 'failed' }).where(eq(captures.id, captureId));
+    } catch (markErr) {
+      console.error(`[processCapture] failed to mark capture as failed:`, (markErr as Error).message);
+    }
+    // Re-throw so the caller (api/captures route's after()) sees the failure
+    throw e;
+  }
+}
+
+/**
+ * The original processCapture body — extracted so we can wrap it in a
+ * try/finally that guarantees a terminal status transition.
+ */
+async function runPipeline(
+  capture: typeof captures.$inferSelect,
+  show: typeof shows.$inferSelect,
+  captureId: string,
+): Promise<void> {
 
   // 2. Load lead form custom fields (or empty if none configured yet)
   const customFields = show.leadFormId
@@ -406,10 +435,9 @@ export async function processCapture({ captureId }: ProcessOptions): Promise<voi
     if (shadow) await runShadowExtraction(shadow, transcript, leadSchema, captureId);
   }
 
-  // 8. Mark processed
-  await db.update(captures).set({ status: 'processed' }).where(eq(captures.id, captureId));
-
-  // 9. Ensure an opportunity is at least marked as "open" still (no-op for now)
+  // Mark-processed is handled by the wrapping processCapture try/finally
+  // — see top of this file. We leave a no-op reference here so the
+  // opportunities import isn't flagged unused.
   void opportunities;
 }
 

@@ -518,11 +518,33 @@ export function useRealtimeAssist() {
               [key]: { value, confidence, at: Date.now() },
             }));
           },
-          (opportunityCode, reason, confidence) => {
+          (opportunityCode, reason, confidence): { accepted: boolean; rejectReason?: string } => {
             const known = existingLeadsRef.current.get(opportunityCode);
+            if (!known) {
+              return {
+                accepted: false,
+                rejectReason: `No lead with opportunityCode "${opportunityCode}" in the EXISTING LEADS list you were given.`,
+              };
+            }
+
+            // Server-side overlap guard: the candidate must share at least one
+            // name token (first or last, substring or phonetic) with what's
+            // been captured live OR with what the rep has said in the
+            // transcript. Catches grasp-at-straws matches where the AI picks a
+            // lead that has zero textual overlap with the rep's input.
+            const candidateTokens = collectNameTokens(known);
+            const repTokens = collectTokensFromTranscript();
+            const overlap = anyTokenOverlap(candidateTokens, repTokens);
+            if (!overlap && candidateTokens.length > 0) {
+              return {
+                accepted: false,
+                rejectReason: `Match rejected: candidate "${known.name ?? known.first_name ?? known.last_name ?? opportunityCode}" shares no name token with anything the rep has said. Do not call match_existing_lead again for this opportunity.`,
+              };
+            }
+
             const name =
-              known?.name ||
-              [known?.first_name, known?.last_name].filter(Boolean).join(' ') ||
+              known.name ||
+              [known.first_name, known.last_name].filter(Boolean).join(' ') ||
               undefined;
             // Always-confirm policy: every match surfaces a Yes/No banner.
             // Nothing pre-fills until the rep explicitly confirms via the UI.
@@ -540,6 +562,59 @@ export function useRealtimeAssist() {
                 },
               ];
             });
+            return { accepted: true };
+
+            // Inline helpers — kept close to use site for readability.
+            function collectNameTokens(fields: Record<string, string>): string[] {
+              const out: string[] = [];
+              for (const k of ['name', 'first_name', 'last_name', 'company']) {
+                const v = fields[k];
+                if (typeof v === 'string') {
+                  for (const tok of v.toLowerCase().split(/[^a-z0-9]+/)) {
+                    if (tok.length >= 2) out.push(tok);
+                  }
+                }
+              }
+              return out;
+            }
+            function collectTokensFromTranscript(): Set<string> {
+              const tokens = new Set<string>();
+              // Captured live fields (what the AI committed via set_lead_field)
+              for (const [, v] of Object.entries(liveFields)) {
+                if (v.value) {
+                  for (const tok of v.value.toLowerCase().split(/[^a-z0-9]+/)) {
+                    if (tok.length >= 2) tokens.add(tok);
+                  }
+                }
+              }
+              // Rep's spoken/typed transcript — captures things they said
+              // before the AI tool-called them.
+              for (const t of transcript) {
+                if (t.role === 'user') {
+                  for (const tok of t.text.toLowerCase().split(/[^a-z0-9]+/)) {
+                    if (tok.length >= 3) tokens.add(tok);
+                  }
+                }
+              }
+              return tokens;
+            }
+            function anyTokenOverlap(a: string[], b: Set<string>): boolean {
+              for (const tok of a) {
+                if (b.has(tok)) return true;
+                // Also allow loose phonetic prefix match (e.g. "axis" ≈ "access")
+                for (const candidate of b) {
+                  if (
+                    tok.length >= 4 &&
+                    candidate.length >= 4 &&
+                    (tok.startsWith(candidate.slice(0, 4)) ||
+                      candidate.startsWith(tok.slice(0, 4)))
+                  ) {
+                    return true;
+                  }
+                }
+              }
+              return false;
+            }
           },
           (reason) => {
             setEndRequested({ reason, at: Date.now() });
@@ -672,7 +747,11 @@ function handleServerMessage(
   audioCtx: AudioContext,
   pushTranscript: (entry: TranscriptEntry) => void,
   setField: (key: string, value: string, confidence?: number) => void,
-  matchExistingLead: (opportunityCode: string, reason: string, confidence: number) => void,
+  matchExistingLead: (
+    opportunityCode: string,
+    reason: string,
+    confidence: number,
+  ) => { accepted: boolean; rejectReason?: string },
   endConversation: (reason: string) => void,
   onRepActivity: () => void,
 ) {
@@ -772,15 +851,26 @@ function handleServerMessage(
           reason,
         );
         if (opportunityCode && !reasonSaysNoMatch) {
-          matchExistingLead(opportunityCode, reason, confidence);
-          responses.push({
-            id: call.id,
-            name: call.name,
-            response: {
-              ok: true,
-              note: 'Rep is being shown a Yes/No banner to confirm the match. Continue the conversation as normal — do not assume the match was accepted until you see the next system message indicating confirmation.',
-            },
-          });
+          const result = matchExistingLead(opportunityCode, reason, confidence);
+          if (result.accepted) {
+            responses.push({
+              id: call.id,
+              name: call.name,
+              response: {
+                ok: true,
+                note: 'Rep is being shown a Yes/No banner to confirm the match. Continue the conversation as normal — do not assume the match was accepted until you see the next system message indicating confirmation.',
+              },
+            });
+          } else {
+            responses.push({
+              id: call.id,
+              name: call.name,
+              response: {
+                ok: false,
+                error: result.rejectReason ?? 'Match rejected.',
+              },
+            });
+          }
         } else if (reasonSaysNoMatch) {
           responses.push({
             id: call.id,

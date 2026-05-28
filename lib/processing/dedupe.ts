@@ -103,17 +103,55 @@ ${JSON.stringify(candidatesPayload, null, 2)}`;
     });
     const out = result.fields as z.infer<typeof dedupeSchema>;
     const threshold = args.threshold ?? 0.75;
-    const accepted = out.match && (out.matchedOpportunityId ?? '').length > 0 && out.confidence >= threshold;
+    let accepted = out.match && (out.matchedOpportunityId ?? '').length > 0 && out.confidence >= threshold;
+
+    // Belt-and-suspenders: even if the AI says match, require at least one
+    // name-token overlap between the candidate and the new lead. Catches
+    // grasp-at-straws matches like Linda Smith ↔ Sarah Okafor.
+    if (accepted && out.matchedOpportunityId) {
+      const cand = candidates.find((c) => c.opportunityId === out.matchedOpportunityId);
+      if (cand) {
+        const candTokens = identityTokens(cand.mergedFields as Record<string, unknown>);
+        const newTokens = identityTokens(args.newFields);
+        const hasOverlap = candTokens.some((t) => newTokens.includes(t));
+        if (!hasOverlap) {
+          console.warn(
+            `[dedupe] AI suggested match ${out.matchedOpportunityId} (conf=${out.confidence}) but candidate shares no name token with new lead — rejecting.`,
+          );
+          accepted = false;
+        }
+      }
+    }
+
     return {
       matchedOpportunityId: accepted ? out.matchedOpportunityId : null,
       confidence: out.confidence,
-      reasoning: out.reasoning,
+      reasoning: accepted ? out.reasoning : `${out.reasoning} (post-hoc rejected: no token overlap)`,
       candidateCount: candidates.length,
     };
   } catch (e) {
     console.error('[dedupe] LLM call failed:', (e as Error).message);
     return { matchedOpportunityId: null, confidence: 0, reasoning: 'LLM error', candidateCount: candidates.length };
   }
+}
+
+/**
+ * Lowercased non-empty word tokens (>=2 chars) drawn from identity fields.
+ * Used to sanity-check AI-suggested matches: candidate and new lead should
+ * share at least one such token, otherwise the match is almost certainly
+ * the AI grasping at straws.
+ */
+function identityTokens(fields: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  for (const k of ['name', 'first_name', 'last_name', 'company', 'email']) {
+    const v = fields[k];
+    if (typeof v === 'string') {
+      for (const tok of v.toLowerCase().split(/[^a-z0-9]+/)) {
+        if (tok.length >= 2) out.add(tok);
+      }
+    }
+  }
+  return Array.from(out);
 }
 
 function pickIdentityFields(fields: Record<string, unknown>): Record<string, unknown> {

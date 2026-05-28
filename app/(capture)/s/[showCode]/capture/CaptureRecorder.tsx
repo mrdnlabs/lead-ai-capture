@@ -102,15 +102,17 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
     if (!simulatedOffline) void drainQueue().catch(() => {});
   }, [simulatedOffline]);
 
-  // AI flagged a match → auto-set as targetLead (one-tap "Yes" replaced).
-  // The match-banner shows with a "not them" button so the rep can roll back.
+  // AI flagged a match → auto-set targetLead ONLY for high-confidence matches
+  // (>= 0.9, where the hook also auto-applied the prefill). Lower-confidence
+  // matches surface a Yes/No banner instead — targetLead is set when the rep
+  // taps Yes (see LiveBody onConfirmMatch).
   const lastSeenMatchRef = useRef<number | null>(null);
   useEffect(() => {
     const latest = realtime.existingLeadMatches[realtime.existingLeadMatches.length - 1];
     if (!latest) return;
     if (lastSeenMatchRef.current === latest.at) return;
     lastSeenMatchRef.current = latest.at;
-    if (!targetLead) {
+    if (!targetLead && latest.prefillApplied) {
       setTargetLead({
         code: latest.opportunityCode,
         name: latest.name ?? latest.opportunityCode,
@@ -373,15 +375,33 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
             transcript={realtime.transcript}
             liveFields={realtime.liveFields}
             requiredFields={realtime.requiredFields}
-            existingMatch={
-              targetLead
-                ? { code: targetLead.code, name: targetLead.name }
-                : null
-            }
+            existingMatch={(() => {
+              // Prefer the most recent un-dismissed match flagged by the AI
+              // (could be tentative-awaiting-confirm or already-prefilled).
+              const m = realtime.existingLeadMatches[realtime.existingLeadMatches.length - 1];
+              if (!m) return null;
+              return {
+                code: m.opportunityCode,
+                name: m.name ?? m.opportunityCode,
+                confidence: m.confidence,
+                prefillApplied: m.prefillApplied,
+              };
+            })()}
+            onConfirmMatch={() => {
+              const m = realtime.existingLeadMatches[realtime.existingLeadMatches.length - 1];
+              if (!m) return;
+              realtime.confirmExistingLeadPrefill(m.opportunityCode);
+              setTargetLead({
+                code: m.opportunityCode,
+                name: m.name ?? m.opportunityCode,
+              });
+            }}
             onClearMatch={() => {
-              if (targetLead) {
-                realtime.rollbackExistingLeadPrefill(targetLead.code);
-                realtime.dismissExistingLeadMatch(targetLead.code);
+              const m = realtime.existingLeadMatches[realtime.existingLeadMatches.length - 1];
+              if (m) {
+                // Roll back any prefill that was already applied; safe no-op otherwise.
+                realtime.rollbackExistingLeadPrefill(m.opportunityCode);
+                realtime.dismissExistingLeadMatch(m.opportunityCode);
               }
               setTargetLead(null);
             }}
@@ -745,6 +765,7 @@ function LiveBody({
   liveFields,
   requiredFields,
   existingMatch,
+  onConfirmMatch,
   onClearMatch,
   transcriptScrollRef,
   photoPreviewUrl,
@@ -754,7 +775,15 @@ function LiveBody({
   transcript: ReturnType<typeof useRealtimeAssist>['transcript'];
   liveFields: ReturnType<typeof useRealtimeAssist>['liveFields'];
   requiredFields: ReturnType<typeof useRealtimeAssist>['requiredFields'];
-  existingMatch: { code: string; name: string } | null;
+  existingMatch: {
+    code: string;
+    name: string;
+    confidence: number;
+    /** True if checklist was already auto-prefilled. False = tentative,
+     *  waiting for rep to tap Yes/No before any prefill happens. */
+    prefillApplied: boolean;
+  } | null;
+  onConfirmMatch: () => void;
   onClearMatch: () => void;
   transcriptScrollRef: React.RefObject<HTMLDivElement | null>;
   photoPreviewUrl: string | null;
@@ -770,24 +799,63 @@ function LiveBody({
   return (
     <>
       {existingMatch ? (
-        <div className="match-banner">
-          <div className="w-[38px] h-[38px] rounded-[10px] bg-accent text-accent-ink flex items-center justify-center flex-shrink-0">
-            <Sparkles size={18} />
+        existingMatch.prefillApplied ? (
+          // High-confidence auto-applied — show banner with "not them" rollback
+          <div className="match-banner">
+            <div className="w-[38px] h-[38px] rounded-[10px] bg-accent text-accent-ink flex items-center justify-center flex-shrink-0">
+              <Sparkles size={18} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="label">Returning lead</div>
+              <div className="who whitespace-nowrap overflow-hidden text-ellipsis">
+                {existingMatch.name}{' '}
+                <span className="code ml-1.5">{existingMatch.code}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClearMatch}
+              className="flex-shrink-0 h-7 px-2.5 rounded-md text-xs font-medium whitespace-nowrap border border-rule-2 bg-surface text-ink-2"
+            >
+              not them
+            </button>
           </div>
-          <div className="flex-1 min-w-0">
-            <div className="label">Returning lead</div>
-            <div className="who whitespace-nowrap overflow-hidden text-ellipsis">
-              {existingMatch.name} <span className="code ml-1.5">{existingMatch.code}</span>
+        ) : (
+          // Tentative — AI isn't fully sure. Ask the rep to confirm before any
+          // prefill happens.
+          <div className="match-banner" style={{ background: 'var(--paper-2)', borderColor: 'var(--rule-2)' }}>
+            <div className="w-[38px] h-[38px] rounded-[10px] bg-paper-3 text-ink-2 flex items-center justify-center flex-shrink-0">
+              <Sparkles size={18} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="label" style={{ color: 'var(--ink-3)' }}>
+                Could be a returning lead
+              </div>
+              <div className="who whitespace-nowrap overflow-hidden text-ellipsis">
+                {existingMatch.name}{' '}
+                <span className="code ml-1.5" style={{ color: 'var(--ink-3)' }}>
+                  {existingMatch.code}
+                </span>
+              </div>
+            </div>
+            <div className="flex gap-1.5 flex-shrink-0">
+              <button
+                type="button"
+                onClick={onConfirmMatch}
+                className="h-7 px-2.5 rounded-md text-xs font-semibold whitespace-nowrap bg-ink text-paper"
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                onClick={onClearMatch}
+                className="h-7 px-2.5 rounded-md text-xs font-medium whitespace-nowrap border border-rule-2 bg-surface text-ink-2"
+              >
+                No
+              </button>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClearMatch}
-            className="flex-shrink-0 h-7 px-2.5 rounded-md text-xs font-medium whitespace-nowrap border border-rule-2 bg-surface text-ink-2"
-          >
-            not them
-          </button>
-        </div>
+        )
       ) : null}
 
       {/* Photo thumb (always — even without AI we want the rep to see what

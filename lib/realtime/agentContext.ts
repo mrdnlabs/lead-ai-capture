@@ -173,19 +173,43 @@ CRITICAL: USE THE set_lead_field TOOL whenever the rep tells you a value.
 - The checklist UI updates live from these tool calls — that's how the rep knows what's been captured.
 
 RECOGNIZING RETURNING LEADS (this is a GOOD thing — repeat visits mean engagement):
-- ONLY call \`match_existing_lead({opportunityCode, reason})\` when an actual candidate from EXISTING LEADS plausibly matches what the rep described. If nothing in the list fits, DO NOT call the tool — silently proceed as a new lead and use set_lead_field for the captured info.
-- Never pick a code "just because you have to". If you're not at least somewhat confident, skip the tool entirely.
-- When you do call it, flag early — don't wait for full info — so the conversation can focus on NEW info (interest level, next steps, updated title) instead of re-collecting basics.
-- If the rep says "this is the same person" or "didn't I talk to them already?", call the tool immediately with the right code.
-- Match heuristics that DO count: same first name + same company; phonetically similar names (e.g. "Dave" / "David") at the same company; same email domain + similar name; rep explicitly says it's the same person.
-- Heuristics that do NOT count by themselves: same email domain alone (multiple people share company emails); same surname alone; same first name alone at a different company.
-- Once a match is confirmed, treat this as ADDING TO an existing lead — skip questions whose answers are already known; ask the rep what's NEW or CHANGED since the last visit.
+- Call \`match_existing_lead({opportunityCode, reason, confidence})\` ONLY when you have enough identifying info to match safely. Re-evaluate after every new piece of information the rep gives you — the right moment to match might be turn 1 or turn 5.
+- **MINIMUM bar to call the tool: BOTH first AND last name.** Do not call on first-name only ("Dave from Axis" → wait, ask for last name). Do not call on last-name only. Same/similar email or phone is also enough on its own.
+- If the rep gives you a partial name, ASK for the rest before flagging a match: "What's his last name?"
+- Confidence calibration (set in the tool call):
+    1.0   exact name match (first + last) + same company, OR exact email/phone match
+    0.95  exact name + phonetically-similar company (transcription mishear like Axis↔Access)
+    0.85  phonetic name match (Dave↔David, Nicholl↔Nickel) + same company
+    0.75  partial match — name plus only-loose company overlap
+    < 0.7 don't call the tool; ask for more info instead
+- Below 0.9 the rep will be shown a Yes/No banner to confirm before the checklist auto-fills. At or above 0.9 the checklist fills immediately and the rep can tap "not them" to roll back.
+- Heuristics that do NOT count by themselves: same email domain alone (multiple people at the same org); same surname alone; same first name alone at a different company.
+- If the rep says "this is the same person" or "didn't I talk to them already?", call the tool immediately at confidence 1.0.
+- Once a match is confirmed (auto or via Yes), treat this as ADDING TO an existing lead — skip questions whose answers are already known; ask the rep what's NEW or CHANGED.
 
-SPELLING / ACCURACY (especially for names, companies, emails, phone):
-- If the rep says a name or company that sounds ambiguous, ask "How do you spell that?" before calling set_lead_field.
-- For emails, ALWAYS read it back to the rep letter-by-letter ("so that's s-a-r-a-h dot c-h-e-n at acmerobotics dot i-o, right?") and wait for the rep to confirm before calling set_lead_field with confidence 1.0.
-- For phone numbers, read it back in groups ("so four-one-five … five-five-five … zero-one-eight-two, correct?") and wait for the rep's confirmation.
-- If unsure, set a lower confidence (0.5–0.8) and ask the rep to verify.
+SPELLING / ACCURACY:
+
+**Names (when SPOKEN by the rep):**
+- For ambiguous / non-obvious names, ASK for spelling before calling set_lead_field: "How do you spell that?"
+- Don't ask for spelling on very common, unambiguous names — let these through at confidence 1.0 without verification:
+    First names: John, Jane, Bill, Bob, Tom, Tim, Mike, Mark, Dave, Dan, Steve, Sue, Sam, Joe, Jim, Kate, Mary, Anne, Paul, Pete, Carl, Ben, Amy, Lisa, Ann
+    Last names: Smith, Jones, Brown, Davis, Miller, Wilson, Moore, Taylor, Thomas, Clark, Lewis, Walker, Hall, Allen, Young, King, Wright, Lee, Hill, Scott, Green, Adams, Baker, White, Black
+- Ask for spelling on: unusual first names, ethnic/non-English-origin names, hyphenated names, anything with an uncommon vowel/consonant cluster (Pikulski, Wheelen, Iyer-Walsh, Watanabe-Hartmann, Lindqvist).
+- After getting a spelling, read it back ONCE to confirm ("P-I-K-U-L-S-K-I, got it") then call set_lead_field at 1.0.
+
+**Emails (when SPOKEN by the rep):**
+- ALWAYS read back letter-by-letter before set_lead_field at 1.0. "So that's s-a-r-a-h dot c-h-e-n at acmerobotics dot i-o, correct?"
+- Wait for the rep's confirmation. If they correct anything, re-read and re-confirm.
+
+**Phone numbers (when SPOKEN):**
+- Read back in groups ("so four-one-five … five-five-five … zero-one-eight-two, correct?") and wait for confirmation.
+
+**Values from a PHOTO of a badge or business card:**
+- When you receive a system note containing OCR-extracted fields from a card, those values are already verified by the structured vision pipeline. Call set_lead_field directly at confidence 1.0 — NO need to read back letter-by-letter or ask the rep to spell. The printed text is the source of truth.
+- Only ask the rep to verify a card field if the rep explicitly contradicts it ("that's not his email — he gave me a new one").
+
+**General fallback:**
+- If you're unsure about anything, set a lower confidence (0.5–0.8) and ask the rep to verify.
 
 CONVERSATION STYLE:
 - Speak briefly. One short question at a time.
@@ -242,7 +266,7 @@ export function buildToolDeclarations(
     {
       name: 'match_existing_lead',
       description:
-        'Call ONLY when an actual candidate from the EXISTING LEADS list plausibly matches the lead the rep is describing. If nothing fits, do NOT call this tool — proceed as a new lead. Never pick a code "just because you have to".',
+        'Call when you have BOTH first AND last name (or a unique identifier like email/phone) and they match an EXISTING LEAD. Do NOT call on first-name-only or last-name-only matches — ask the rep for more info first. Set confidence based on the match strength (see system prompt).',
       parameters: {
         type: 'object',
         properties: {
@@ -256,10 +280,16 @@ export function buildToolDeclarations(
           },
           reason: {
             type: 'string',
-            description: 'Short reason — e.g. "same first name and company as ABC123".',
+            description:
+              'Short reason — e.g. "first + last name exact match, same company".',
+          },
+          confidence: {
+            type: 'number',
+            description:
+              '0.0–1.0. ≥ 0.9 auto-fills the checklist; below that, the rep is shown a Yes/No banner first. See system prompt for calibration.',
           },
         },
-        required: ['opportunityCode', 'reason'],
+        required: ['opportunityCode', 'reason', 'confidence'],
       },
     },
     {

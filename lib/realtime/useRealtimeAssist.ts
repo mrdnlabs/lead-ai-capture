@@ -39,7 +39,16 @@ export interface ExistingLeadMatch {
   at: number;
   /** Display name derived from the lead's known fields (if available). */
   name?: string;
+  /** AI's confidence the match is correct, 0.0–1.0. >= 0.9 = auto-prefill;
+   *  below that, the UI asks the rep to confirm before any prefill. */
+  confidence: number;
+  /** True if we've already applied the prefill (auto on high conf, or after
+   *  rep tapped Yes). UI uses this to decide which banner mode to render. */
+  prefillApplied: boolean;
 }
+
+/** Below this threshold, the rep is asked to confirm before any prefill. */
+const AUTO_PREFILL_THRESHOLD = 0.9;
 
 interface TokenResponse {
   token: string;
@@ -511,19 +520,33 @@ export function useRealtimeAssist() {
               [key]: { value, confidence, at: Date.now() },
             }));
           },
-          (opportunityCode, reason) => {
+          (opportunityCode, reason, confidence) => {
             const known = existingLeadsRef.current.get(opportunityCode);
             const name =
               known?.name ||
               [known?.first_name, known?.last_name].filter(Boolean).join(' ') ||
               undefined;
+            const autoApply = confidence >= AUTO_PREFILL_THRESHOLD;
             setExistingLeadMatches((cur) => {
               // Don't re-add the same match within a session.
               if (cur.some((f) => f.opportunityCode === opportunityCode)) return cur;
-              return [...cur, { opportunityCode, reason, at: Date.now(), name }];
+              return [
+                ...cur,
+                {
+                  opportunityCode,
+                  reason,
+                  at: Date.now(),
+                  name,
+                  confidence,
+                  prefillApplied: autoApply,
+                },
+              ];
             });
-            // Optimistically prefill — rep can roll back via the banner.
-            applyExistingLeadPrefill(opportunityCode);
+            if (autoApply) {
+              // High-confidence match → prefill immediately; rep can roll back.
+              applyExistingLeadPrefill(opportunityCode);
+            }
+            // Low-confidence: banner shows with Yes/No; nothing prefills until rep taps Yes.
           },
           (reason) => {
             setEndRequested({ reason, at: Date.now() });
@@ -550,6 +573,15 @@ export function useRealtimeAssist() {
     existingLeadMatches,
     /** Roll back the optimistic prefill (rep rejected the AI's match). */
     rollbackExistingLeadPrefill,
+    /** Apply prefill on a previously-tentative match (rep tapped Yes). */
+    confirmExistingLeadPrefill: (opportunityCode: string) => {
+      applyExistingLeadPrefill(opportunityCode);
+      setExistingLeadMatches((cur) =>
+        cur.map((m) =>
+          m.opportunityCode === opportunityCode ? { ...m, prefillApplied: true } : m,
+        ),
+      );
+    },
     /** Dismiss a match (so the banner goes away). */
     dismissExistingLeadMatch: (opportunityCode: string) =>
       setExistingLeadMatches((cur) =>
@@ -647,7 +679,7 @@ function handleServerMessage(
   audioCtx: AudioContext,
   pushTranscript: (entry: TranscriptEntry) => void,
   setField: (key: string, value: string, confidence?: number) => void,
-  matchExistingLead: (opportunityCode: string, reason: string) => void,
+  matchExistingLead: (opportunityCode: string, reason: string, confidence: number) => void,
   endConversation: (reason: string) => void,
   onRepActivity: () => void,
 ) {
@@ -734,6 +766,12 @@ function handleServerMessage(
         const opportunityCode =
           typeof args.opportunityCode === 'string' ? args.opportunityCode : null;
         const reason = typeof args.reason === 'string' ? args.reason : '';
+        // Confidence defaults to 0.7 (tentative) if the AI didn't supply one
+        // — we want the rep to confirm in that case rather than auto-fill.
+        const confidence =
+          typeof args.confidence === 'number'
+            ? Math.max(0, Math.min(1, args.confidence))
+            : 0.7;
         // Defensive: the AI sometimes calls this with a "no match" reason
         // (the enum forces a code but the reasoning negates the call). Drop
         // those so the rep doesn't see a contradictory banner.
@@ -741,13 +779,17 @@ function handleServerMessage(
           reason,
         );
         if (opportunityCode && !reasonSaysNoMatch) {
-          matchExistingLead(opportunityCode, reason);
+          matchExistingLead(opportunityCode, reason, confidence);
           responses.push({
             id: call.id,
             name: call.name,
             response: {
               ok: true,
-              note: 'Rep notified — waiting for their confirm.',
+              autoApplied: confidence >= 0.9,
+              note:
+                confidence >= 0.9
+                  ? 'High confidence — checklist auto-filled. Rep can tap "not them" to roll back.'
+                  : 'Lower confidence — rep is being asked to confirm before any prefill.',
             },
           });
         } else if (reasonSaysNoMatch) {

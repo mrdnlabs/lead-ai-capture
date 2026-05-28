@@ -78,11 +78,11 @@ export default async function AnalyticsPage() {
         </p>
       </header>
 
-      <section className="rounded-lg border border-neutral-200">
+      <section className="rounded-lg border border-neutral-200 overflow-x-auto">
         <header className="border-b border-neutral-200 bg-neutral-50 px-4 py-2">
           <h2 className="text-sm font-medium">Per-provider rollup</h2>
         </header>
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[520px] text-sm">
           <thead className="text-left text-xs uppercase tracking-wide text-neutral-500">
             <tr>
               <th className="px-4 py-2">Config</th>

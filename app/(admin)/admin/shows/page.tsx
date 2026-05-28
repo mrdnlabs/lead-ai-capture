@@ -29,9 +29,9 @@ export default async function ShowsAdminPage() {
         {rows.map(({ show, leadForm }) => (
           <li
             key={show.id}
-            className="rounded-lg border border-neutral-200 px-4 py-3 text-sm flex items-center justify-between"
+            className="rounded-lg border border-neutral-200 px-4 py-3 text-sm flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
           >
-            <div>
+            <div className="min-w-0">
               <div className="font-medium text-neutral-900">{show.name}</div>
               <div className="text-xs text-neutral-500">
                 <code className="font-mono">{show.slug}</code> ·{' '}
@@ -40,7 +40,7 @@ export default async function ShowsAdminPage() {
                   : 'No lead form yet (captures will use default fields)'}
               </div>
             </div>
-            <div className="row gap-2">
+            <div className="flex flex-wrap gap-2">
               <a
                 href={`/admin/shows/${show.id}/team`}
                 className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"

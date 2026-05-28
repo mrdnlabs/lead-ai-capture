@@ -68,20 +68,24 @@ export default async function TeamPage({ params }: Params) {
       {/* Active invite link card */}
       <section className="invite-link">
         {qrDataUrl ? (
-          <div className="row gap-4 items-start">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={qrDataUrl} alt="Invite QR code" className="w-28 h-28 rounded-md border border-rule" />
+            <img
+              src={qrDataUrl}
+              alt="Invite QR code"
+              className="w-32 h-32 sm:w-28 sm:h-28 rounded-md border border-rule self-start"
+            />
             <div className="flex-1 min-w-0 space-y-2">
               <div className="text-sm font-semibold">Shareable invite link</div>
-              <div className="link">{inviteUrl}</div>
-              <div className="row gap-2 flex-wrap">
+              <div className="link break-all">{inviteUrl}</div>
+              <div className="flex flex-wrap gap-2">
                 <span className="role-tag rep">{live!.role}</span>
                 <span className="role-tag">{fmtExpiry(live!.expiresAt)}</span>
                 <span className="role-tag">
                   {live!.usedCount} / {live!.maxUses} used
                 </span>
               </div>
-              <div className="row gap-2 mt-1">
+              <div className="flex flex-wrap gap-2 mt-1">
                 <form action={revokeInviteAction}>
                   <input type="hidden" name="inviteId" value={live!.id} />
                   <input type="hidden" name="showId" value={showId} />
@@ -101,33 +105,43 @@ export default async function TeamPage({ params }: Params) {
             </div>
           </div>
         ) : (
-          <form action={mintInviteAction} className="row gap-3 items-baseline">
+          <form
+            action={mintInviteAction}
+            className="flex flex-col gap-3 sm:flex-row sm:items-end sm:flex-wrap"
+          >
             <input type="hidden" name="showId" value={showId} />
-            <select name="role" className="input" style={{ width: 110, height: 40 }}>
-              <option value="rep">rep</option>
-              <option value="lead">lead</option>
-            </select>
-            <input
-              name="days"
-              type="number"
-              defaultValue={14}
-              min={1}
-              max={90}
-              className="input"
-              style={{ width: 90, height: 40 }}
-              aria-label="days valid"
-            />
-            <input
-              name="maxUses"
-              type="number"
-              defaultValue={50}
-              min={1}
-              max={500}
-              className="input"
-              style={{ width: 90, height: 40 }}
-              aria-label="max uses"
-            />
-            <button type="submit" className="btn btn-primary btn-sm">
+            <label className="flex flex-col gap-1 sm:w-[120px]">
+              <span className="t-eyebrow">Role</span>
+              <select name="role" className="input" style={{ height: 40 }}>
+                <option value="rep">rep</option>
+                <option value="lead">lead</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 sm:w-[100px]">
+              <span className="t-eyebrow">Days valid</span>
+              <input
+                name="days"
+                type="number"
+                defaultValue={14}
+                min={1}
+                max={90}
+                className="input"
+                style={{ height: 40 }}
+              />
+            </label>
+            <label className="flex flex-col gap-1 sm:w-[100px]">
+              <span className="t-eyebrow">Max uses</span>
+              <input
+                name="maxUses"
+                type="number"
+                defaultValue={50}
+                min={1}
+                max={500}
+                className="input"
+                style={{ height: 40 }}
+              />
+            </label>
+            <button type="submit" className="btn btn-primary sm:btn-sm">
               Generate invite
             </button>
           </form>

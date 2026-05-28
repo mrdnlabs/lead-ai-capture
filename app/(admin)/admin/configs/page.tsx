@@ -55,7 +55,8 @@ export default async function ConfigsPage() {
             {rows.length === 0 ? (
               <div className="px-4 py-6 text-sm text-neutral-400">No configs for this kind.</div>
             ) : (
-              <table className="w-full text-sm">
+              <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px] text-sm">
                 <thead className="border-b border-neutral-100 text-left text-xs uppercase tracking-wide text-neutral-500">
                   <tr>
                     <th className="px-4 py-2 font-medium">Label</th>
@@ -89,6 +90,7 @@ export default async function ConfigsPage() {
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
           </section>
         );

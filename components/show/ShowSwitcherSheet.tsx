@@ -1,11 +1,13 @@
 'use client';
 
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, ChevronRight, QrCode } from 'lucide-react';
 import { Sheet } from '@/components/ui/Sheet';
 import { LivePill } from '@/components/ui/LivePill';
 import { ShowSwatch } from '@/components/ui/ShowSwatch';
 import { OpCode } from '@/components/ui/OpCode';
+import { JoinShowSheet } from '@/components/sheets/JoinShowSheet';
 
 /** A single show the current rep belongs to. */
 export interface ShowSummary {
@@ -34,8 +36,10 @@ interface ShowSwitcherSheetProps {
 
 export function ShowSwitcherSheet({ open, onClose, currentSlug, shows }: ShowSwitcherSheetProps) {
   const router = useRouter();
+  const [joinOpen, setJoinOpen] = useState(false);
 
   return (
+    <>
     <Sheet open={open} onClose={onClose} title="Switch show">
       {shows.map((s) => {
         const isCurrent = s.slug === currentSlug;
@@ -91,10 +95,7 @@ export function ShowSwitcherSheet({ open, onClose, currentSlug, shows }: ShowSwi
       <button
         type="button"
         className="card-flat mt-3 flex items-center gap-2.5 text-left border-0 w-full"
-        onClick={() => {
-          // Out of scope: scan-QR flow. For now, route to a placeholder.
-          window.alert('Join-a-show: paste your invite link in the address bar (full flow coming).');
-        }}
+        onClick={() => setJoinOpen(true)}
       >
         <div className="w-9 h-9 rounded-[10px] bg-surface text-ink-2 border border-rule-2 flex items-center justify-center">
           <QrCode size={18} />
@@ -106,5 +107,7 @@ export function ShowSwitcherSheet({ open, onClose, currentSlug, shows }: ShowSwi
         <ChevronRight size={16} className="text-ink-4" />
       </button>
     </Sheet>
+    <JoinShowSheet open={joinOpen} onClose={() => setJoinOpen(false)} />
+    </>
   );
 }

@@ -55,8 +55,8 @@ export default async function ProvidersPage() {
         </section>
       ) : null}
 
-      <section className="rounded-lg border border-neutral-200">
-        <table className="w-full text-sm">
+      <section className="rounded-lg border border-neutral-200 overflow-x-auto">
+        <table className="w-full min-w-[640px] text-sm">
           <thead className="border-b border-neutral-200 bg-neutral-50 text-left text-xs uppercase tracking-wide text-neutral-500">
             <tr>
               <th className="px-4 py-2 font-medium">Provider</th>

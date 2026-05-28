@@ -821,15 +821,29 @@ function LiveBody({
             </button>
           </div>
         ) : (
-          // Tentative — AI isn't fully sure. Ask the rep to confirm before any
-          // prefill happens.
-          <div className="match-banner" style={{ background: 'var(--paper-2)', borderColor: 'var(--rule-2)' }}>
+          // Tentative — every match requires Yes/No confirmation before any
+          // prefill. The confidence chip helps the rep judge how seriously to
+          // take the suggestion.
+          <div
+            className="match-banner"
+            style={{ background: 'var(--paper-2)', borderColor: 'var(--rule-2)' }}
+          >
             <div className="w-[38px] h-[38px] rounded-[10px] bg-paper-3 text-ink-2 flex items-center justify-center flex-shrink-0">
               <Sparkles size={18} />
             </div>
             <div className="flex-1 min-w-0">
-              <div className="label" style={{ color: 'var(--ink-3)' }}>
-                Could be a returning lead
+              <div className="label flex items-center gap-1.5" style={{ color: 'var(--ink-3)' }}>
+                <span>Possibly a returning lead</span>
+                <span
+                  className="font-mono text-[9px] px-1 py-px rounded"
+                  style={{
+                    background: 'var(--paper-3)',
+                    color: 'var(--ink-4)',
+                  }}
+                  title={`AI confidence ${existingMatch.confidence.toFixed(2)}`}
+                >
+                  {Math.round(existingMatch.confidence * 100)}%
+                </span>
               </div>
               <div className="who whitespace-nowrap overflow-hidden text-ellipsis">
                 {existingMatch.name}{' '}

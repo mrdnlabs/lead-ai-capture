@@ -87,6 +87,30 @@ const SEED_LEADS: Seed[] = [
       title: 'Sales Director',
     },
   },
+  // Second John Smith at a different company — tests disambiguation: when the
+  // rep says "John Smith stopped by", the AI should ask which one before
+  // calling match_existing_lead.
+  {
+    code: 'TST010',
+    fields: {
+      name: 'John Smith',
+      email: 'john.smith@northwind.co',
+      company: 'Northwind Logistics',
+      title: 'Operations Manager',
+    },
+  },
+  // Common-first-name + common-last-name lead — tests the "skip spelling
+  // verification for common unambiguous names" rule. AI should NOT ask the
+  // rep to spell "Bill Jones".
+  {
+    code: 'TST011',
+    fields: {
+      name: 'Bill Jones',
+      email: 'bill.jones@apex-supplies.com',
+      company: 'Apex Supplies',
+      title: 'Procurement',
+    },
+  },
   // Same email domain as TST001 but a different person — domain alone shouldn't trigger a match
   {
     code: 'TST006',

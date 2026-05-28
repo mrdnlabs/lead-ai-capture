@@ -176,16 +176,17 @@ RECOGNIZING RETURNING LEADS (this is a GOOD thing — repeat visits mean engagem
 - Call \`match_existing_lead({opportunityCode, reason, confidence})\` ONLY when you have enough identifying info to match safely. Re-evaluate after every new piece of information the rep gives you — the right moment to match might be turn 1 or turn 5.
 - **MINIMUM bar to call the tool: BOTH first AND last name.** Do not call on first-name only ("Dave from Axis" → wait, ask for last name). Do not call on last-name only. Same/similar email or phone is also enough on its own.
 - If the rep gives you a partial name, ASK for the rest before flagging a match: "What's his last name?"
-- Confidence calibration (set in the tool call):
+- **Multiple plausible candidates** (e.g. two different "John Smith" leads in EXISTING LEADS): do NOT call the tool. Ask the rep a distinguishing question first — "There are a couple John Smiths in our list — is this the one from Globex or the one from Northwind?" — and only call once the rep has disambiguated.
+- Confidence calibration (set in the tool call — surfaced in the banner so the rep sees how sure you are):
     1.0   exact name match (first + last) + same company, OR exact email/phone match
     0.95  exact name + phonetically-similar company (transcription mishear like Axis↔Access)
     0.85  phonetic name match (Dave↔David, Nicholl↔Nickel) + same company
     0.75  partial match — name plus only-loose company overlap
     < 0.7 don't call the tool; ask for more info instead
-- Below 0.9 the rep will be shown a Yes/No banner to confirm before the checklist auto-fills. At or above 0.9 the checklist fills immediately and the rep can tap "not them" to roll back.
+- **Every match requires explicit Yes/No confirmation from the rep.** A Yes/No banner appears with your candidate. Nothing pre-fills the checklist until the rep taps Yes. Continue the conversation naturally after calling the tool — do NOT assume the match was accepted; the rep might tap No, in which case you'll get a [system] note telling you to drop that opportunity from consideration.
 - Heuristics that do NOT count by themselves: same email domain alone (multiple people at the same org); same surname alone; same first name alone at a different company.
 - If the rep says "this is the same person" or "didn't I talk to them already?", call the tool immediately at confidence 1.0.
-- Once a match is confirmed (auto or via Yes), treat this as ADDING TO an existing lead — skip questions whose answers are already known; ask the rep what's NEW or CHANGED.
+- Once a match is confirmed by the rep, treat this as ADDING TO an existing lead — skip questions whose answers are already known; ask the rep what's NEW or CHANGED.
 
 SPELLING / ACCURACY:
 
@@ -286,7 +287,7 @@ export function buildToolDeclarations(
           confidence: {
             type: 'number',
             description:
-              '0.0–1.0. ≥ 0.9 auto-fills the checklist; below that, the rep is shown a Yes/No banner first. See system prompt for calibration.',
+              '0.0–1.0. Surfaced in the banner so the rep sees how sure you are. Every match still requires explicit Yes/No confirmation — no auto-fill at any threshold. See system prompt for calibration.',
           },
         },
         required: ['opportunityCode', 'reason', 'confidence'],

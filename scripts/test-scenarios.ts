@@ -39,6 +39,16 @@ interface Scenario {
     matchOpportunityCode?: string;
     noMatchExpected?: boolean;
     capturedFields?: Record<string, string | RegExp>;
+    /** Regex that should match at least one AI turn (any turn, concatenated).
+     *  Use for "AI should ask the rep for X" scenarios. */
+    aiAsks?: RegExp;
+    /** Regex that should NOT appear in any AI turn. Use to assert the AI
+     *  *didn't* request spelling for a common name. */
+    aiDoesNotAsk?: RegExp;
+    /** If set, set_lead_field for these keys should never fire below the
+     *  given confidence (e.g. assert that an email captured by voice was
+     *  spell-verified at 1.0). */
+    minFieldConfidence?: Record<string, number>;
   };
 }
 
@@ -145,6 +155,148 @@ const SCENARIOS: Scenario[] = [
     expected: {
       noMatchExpected: true,
       capturedFields: { company: /hardware/i },
+    },
+  },
+
+  // ─── Edge cases added after the "always confirm" policy decision ────────
+
+  {
+    name: 'first-name-only-wait',
+    description:
+      'Rep gives just a first name in turn 1. AI must NOT call match_existing_lead yet — first-name-only is below the matching floor — and must ask for the last name.',
+    repTurns: [
+      'Hey, Dave just stopped by the booth.',
+      'His last name is Chen.',
+      'Yeah, Dave Chen from Acme Robotics. Done.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST001',
+      // The AI must ask for the last name in some form before the match can happen.
+      aiAsks: /last name|full name|spell|surname|family name/i,
+    },
+  },
+
+  {
+    name: 'delayed-last-name-reveal',
+    description:
+      'Rep dribbles info across many turns. AI should wait, ask gap questions, and only match once first+last are in hand.',
+    repTurns: [
+      'Talked to David from Acme.',
+      'Acme Robotics — sorry, should have been more specific.',
+      'His last name is Chen. C-H-E-N.',
+      'He is interested in the enterprise tier. Done.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST001',
+      aiAsks: /last name|full name|spell|who is/i,
+    },
+  },
+
+  {
+    name: 'two-john-smiths-disambiguated-upfront',
+    description:
+      'Two John Smiths in the show (TST005 Globex, TST010 Northwind). Rep names the company up front so disambiguation is implicit.',
+    repTurns: [
+      'John Smith from Globex just came back.',
+      'He wanted to follow up on pricing for the AV demo. Done.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST005',
+    },
+  },
+
+  {
+    name: 'two-john-smiths-ambiguous-must-ask',
+    description:
+      'Two John Smiths in the show. Rep gives just "John Smith". AI must NOT pick one — must ask for the distinguishing company first.',
+    repTurns: [
+      'John Smith stopped by again.',
+      'He is the one from Northwind Logistics. Operations Manager.',
+      'Done.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST010',
+      aiAsks: /globex|northwind|company|which|two|both|several/i,
+    },
+  },
+
+  {
+    name: 'common-name-skip-spelling',
+    description:
+      'Rep gives a Bill Jones (TST011 — already in the system). Common first and last names; AI should NOT ask for spelling readback on either.',
+    repTurns: [
+      'Bill Jones from Apex Supplies came by. Procurement.',
+      'He wanted samples of the new sensor module. Done.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST011',
+      // The AI should NOT ask for spelling on either "Bill" or "Jones" —
+      // both are in the common-names allowlist.
+      aiDoesNotAsk: /how do you spell.*(bill|jones)/i,
+    },
+  },
+
+  {
+    name: 'unusual-name-must-spell',
+    description:
+      'Rep gives an unusual name (Pikulski). AI should ask for spelling before committing.',
+    repTurns: [
+      'Pete Pikulski stopped by.',
+      'P-I-K-U-L-S-K-I. He is with OnLogic, sales engineer.',
+      'Done.',
+    ],
+    expected: {
+      noMatchExpected: true,
+      capturedFields: { last_name: /pikulski/i },
+      aiAsks: /spell|spelling|how do you/i,
+    },
+  },
+
+  {
+    name: 'email-only-match',
+    description:
+      'Rep gives an email that exactly matches an existing lead (TST001 David Chen). Email alone is enough — no name needed.',
+    repTurns: [
+      'I have an email — david.chen at acmerobotics dot io. Can you pull up that lead?',
+      'Yes, that one. He wants a follow-up call next week.',
+      'Done.',
+    ],
+    expected: {
+      matchOpportunityCode: 'TST001',
+    },
+  },
+
+  {
+    name: 'similar-name-different-person-no-match',
+    description:
+      'New person whose name happens to share a first name with an existing lead, but everything else is different. AI must NOT match.',
+    repTurns: [
+      'Met David Marquez from Quantis Robotics. Director of supply chain.',
+      'His email is d.marquez at quantis dot io. Done.',
+    ],
+    expected: {
+      noMatchExpected: true,
+      capturedFields: { first_name: /david/i, company: /quantis/i },
+    },
+  },
+
+  {
+    name: 'email-spelling-verification',
+    description:
+      'Rep gives an email by voice for a new lead. AI must read it back letter-by-letter before committing at confidence 1.0.',
+    repTurns: [
+      'Got a new lead: Anika Khoury from Plinth Software. Head of partnerships.',
+      'Her email is anika at plinth software dot com.',
+      'Yes, a-n-i-k-a at plinth dash software dot com. Confirmed.',
+      'Done.',
+    ],
+    expected: {
+      noMatchExpected: true,
+      capturedFields: {
+        email: /anika.*plinth/i,
+      },
+      minFieldConfidence: { email: 1.0 },
+      aiAsks: /a-n-i-k-a|letter by letter|read.*back|spelled|spell that|correct/i,
     },
   },
 ];
@@ -384,7 +536,7 @@ async function runScenario(
     }
   }
 
-  const notes = checkExpectations(scenario, liveFields, matches);
+  const notes = checkExpectations(scenario, liveFields, matches, transcript);
   return {
     scenario,
     transcript,
@@ -399,6 +551,7 @@ function checkExpectations(
   scenario: Scenario,
   liveFields: SimResult['liveFields'],
   matches: SimResult['matches'],
+  transcript: SimResult['transcript'],
 ): string[] {
   const notes: string[] = [];
   const exp = scenario.expected;
@@ -430,6 +583,31 @@ function checkExpectations(
           : got.toLowerCase().includes(String(expectedVal).toLowerCase());
       if (!ok) {
         notes.push(`FAIL: field '${key}' = '${got}', expected to match '${expectedVal}'`);
+      }
+    }
+  }
+  // AI text-based assertions
+  const aiText = transcript
+    .filter((t) => t.role === 'ai')
+    .map((t) => t.text ?? '')
+    .join('\n');
+  if (exp.aiAsks && !exp.aiAsks.test(aiText)) {
+    notes.push(`FAIL: expected AI to ask /${exp.aiAsks.source}/${exp.aiAsks.flags}, but AI never did`);
+  }
+  if (exp.aiDoesNotAsk && exp.aiDoesNotAsk.test(aiText)) {
+    notes.push(
+      `FAIL: AI was NOT supposed to ask /${exp.aiDoesNotAsk.source}/${exp.aiDoesNotAsk.flags}, but it did`,
+    );
+  }
+  if (exp.minFieldConfidence) {
+    for (const [key, minConf] of Object.entries(exp.minFieldConfidence)) {
+      const f = liveFields[key];
+      if (!f) continue; // capturedFields check covers presence
+      const conf = f.confidence ?? 0;
+      if (conf < minConf) {
+        notes.push(
+          `FAIL: field '${key}' captured at confidence ${conf}, expected >= ${minConf}`,
+        );
       }
     }
   }

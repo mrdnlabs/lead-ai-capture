@@ -39,16 +39,14 @@ export interface ExistingLeadMatch {
   at: number;
   /** Display name derived from the lead's known fields (if available). */
   name?: string;
-  /** AI's confidence the match is correct, 0.0–1.0. >= 0.9 = auto-prefill;
-   *  below that, the UI asks the rep to confirm before any prefill. */
+  /** AI's confidence the match is correct, 0.0–1.0. Surfaced in the banner
+   *  copy but not used to gate prefill — every match requires explicit
+   *  Yes/No confirmation regardless of confidence. */
   confidence: number;
-  /** True if we've already applied the prefill (auto on high conf, or after
-   *  rep tapped Yes). UI uses this to decide which banner mode to render. */
+  /** True after the rep tapped Yes on the banner. UI uses this to decide
+   *  which banner mode to render. */
   prefillApplied: boolean;
 }
-
-/** Below this threshold, the rep is asked to confirm before any prefill. */
-const AUTO_PREFILL_THRESHOLD = 0.9;
 
 interface TokenResponse {
   token: string;
@@ -526,9 +524,9 @@ export function useRealtimeAssist() {
               known?.name ||
               [known?.first_name, known?.last_name].filter(Boolean).join(' ') ||
               undefined;
-            const autoApply = confidence >= AUTO_PREFILL_THRESHOLD;
+            // Always-confirm policy: every match surfaces a Yes/No banner.
+            // Nothing pre-fills until the rep explicitly confirms via the UI.
             setExistingLeadMatches((cur) => {
-              // Don't re-add the same match within a session.
               if (cur.some((f) => f.opportunityCode === opportunityCode)) return cur;
               return [
                 ...cur,
@@ -538,15 +536,10 @@ export function useRealtimeAssist() {
                   at: Date.now(),
                   name,
                   confidence,
-                  prefillApplied: autoApply,
+                  prefillApplied: false,
                 },
               ];
             });
-            if (autoApply) {
-              // High-confidence match → prefill immediately; rep can roll back.
-              applyExistingLeadPrefill(opportunityCode);
-            }
-            // Low-confidence: banner shows with Yes/No; nothing prefills until rep taps Yes.
           },
           (reason) => {
             setEndRequested({ reason, at: Date.now() });
@@ -785,11 +778,7 @@ function handleServerMessage(
             name: call.name,
             response: {
               ok: true,
-              autoApplied: confidence >= 0.9,
-              note:
-                confidence >= 0.9
-                  ? 'High confidence — checklist auto-filled. Rep can tap "not them" to roll back.'
-                  : 'Lower confidence — rep is being asked to confirm before any prefill.',
+              note: 'Rep is being shown a Yes/No banner to confirm the match. Continue the conversation as normal — do not assume the match was accepted until you see the next system message indicating confirmation.',
             },
           });
         } else if (reasonSaysNoMatch) {

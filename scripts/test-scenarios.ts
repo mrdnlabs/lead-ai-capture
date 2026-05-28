@@ -404,6 +404,9 @@ interface SimResult {
   transcript: Array<{ role: 'rep' | 'ai'; text?: string; toolCalls?: ToolCall[] }>;
   liveFields: Record<string, { value: string; confidence?: number }>;
   matches: Array<{ opportunityCode: string; reason: string }>;
+  /** Matches the AI tried to call but were rejected by the harness's
+   *  overlap guard (mirrors the prod hook's rejection path). */
+  rejectedMatches?: Array<{ opportunityCode: string; reason: string }>;
   passed: boolean;
   notes: string[];
 }
@@ -479,22 +482,105 @@ async function waitForSetupComplete(ws: WebSocket): Promise<void> {
 interface TurnOutcome {
   text: string;
   toolCalls: ToolCall[];
+  /** Tool calls that were rejected by the harness (mirrors the prod hook's
+   *  overlap guard). Surfaced for diagnostic reporting. */
+  rejectedToolCalls: Array<{ name: string; args: Record<string, unknown>; reason: string }>;
   /** True if Gemini ended the turn cleanly, false if we hit the timeout. */
   turnComplete: boolean;
+}
+
+interface RecentLeadForGuard {
+  opportunityCode: string;
+  /** All non-empty fields from mergedFields — name, first_name, last_name,
+   *  company, email, etc. Used to compute name-token overlap. */
+  knownFields: Record<string, string>;
+}
+
+interface MatchGuardContext {
+  recentLeads: Map<string, RecentLeadForGuard>;
+  /** All rep turns sent so far this scenario, lowercased. */
+  repTranscript: string;
+  /** Live fields captured so far this scenario. */
+  liveFields: Record<string, { value: string }>;
+}
+
+/**
+ * Mirror of the overlap guard in lib/realtime/useRealtimeAssist.ts. Returns
+ * { accepted } if the candidate shares at least one name token with what the
+ * rep has said or what's been committed to liveFields. Returns
+ * { accepted: false, reason } otherwise.
+ *
+ * Without this guard the test harness was rubber-stamping every AI-suggested
+ * match, hiding the fact that the production client rejects them.
+ */
+function checkMatchOverlap(
+  opportunityCode: string,
+  ctx: MatchGuardContext,
+): { accepted: true } | { accepted: false; reason: string } {
+  const lead = ctx.recentLeads.get(opportunityCode);
+  if (!lead) {
+    return {
+      accepted: false,
+      reason: `No lead with opportunityCode "${opportunityCode}" in the EXISTING LEADS list you were given.`,
+    };
+  }
+  const candidateTokens: string[] = [];
+  for (const k of ['name', 'first_name', 'last_name', 'company']) {
+    const v = lead.knownFields[k];
+    if (typeof v === 'string') {
+      for (const tok of v.toLowerCase().split(/[^a-z0-9]+/)) {
+        if (tok.length >= 2) candidateTokens.push(tok);
+      }
+    }
+  }
+  const repTokens = new Set<string>();
+  for (const [, v] of Object.entries(ctx.liveFields)) {
+    if (v.value) {
+      for (const tok of v.value.toLowerCase().split(/[^a-z0-9]+/)) {
+        if (tok.length >= 2) repTokens.add(tok);
+      }
+    }
+  }
+  for (const tok of ctx.repTranscript.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (tok.length >= 3) repTokens.add(tok);
+  }
+  for (const tok of candidateTokens) {
+    if (repTokens.has(tok)) return { accepted: true };
+    for (const candidate of repTokens) {
+      if (
+        tok.length >= 4 &&
+        candidate.length >= 4 &&
+        (tok.startsWith(candidate.slice(0, 4)) || candidate.startsWith(tok.slice(0, 4)))
+      ) {
+        return { accepted: true };
+      }
+    }
+  }
+  if (candidateTokens.length === 0) return { accepted: true }; // no signal to compare against — let it through
+  const candidateName =
+    lead.knownFields.name ||
+    [lead.knownFields.first_name, lead.knownFields.last_name].filter(Boolean).join(' ') ||
+    opportunityCode;
+  return {
+    accepted: false,
+    reason: `Match rejected: candidate "${candidateName}" shares no name token with anything the rep has said. Do not call match_existing_lead again for this opportunity.`,
+  };
 }
 
 async function sendTurnAndAwaitComplete(
   ws: WebSocket,
   repText: string,
+  guardCtx: MatchGuardContext,
 ): Promise<TurnOutcome> {
   return new Promise((resolve, reject) => {
     const toolCalls: ToolCall[] = [];
+    const rejectedToolCalls: TurnOutcome['rejectedToolCalls'] = [];
     const textParts: string[] = [];
 
     const timer = setTimeout(() => {
       ws.removeEventListener('message', handler);
       // Don't reject — return partial outcome so the test can still report.
-      resolve({ text: textParts.join(''), toolCalls, turnComplete: false });
+      resolve({ text: textParts.join(''), toolCalls, rejectedToolCalls, turnComplete: false });
     }, TURN_TIMEOUT_MS);
 
     const handler = (ev: MessageEvent) => {
@@ -524,16 +610,36 @@ async function sendTurnAndAwaitComplete(
         | undefined;
       if (tc?.functionCalls && tc.functionCalls.length > 0) {
         const responses = tc.functionCalls.map((fc) => {
-          toolCalls.push({ id: fc.id, name: fc.name, args: fc.args ?? {} });
-          // Acknowledge with the same shape the production client uses.
-          return {
-            id: fc.id,
-            name: fc.name,
-            response:
-              fc.name === 'match_existing_lead'
-                ? { ok: true, note: 'Rep notified — waiting for their confirm.' }
-                : { ok: true },
-          };
+          const args = fc.args ?? {};
+          // Apply the same overlap guard the production hook applies.
+          // Rejected matches are NOT added to toolCalls — the AI sees an
+          // error response and (correctly) backs off.
+          if (fc.name === 'match_existing_lead') {
+            const opportunityCode = String(args.opportunityCode ?? '');
+            const reasonText = String(args.reason ?? '').toLowerCase();
+            const reasonSaysNoMatch = /no match|no plausible|none of|no candidate/.test(reasonText);
+            if (!opportunityCode || reasonSaysNoMatch) {
+              // AI declined to match — treat as no-op, don't record.
+              return { id: fc.id, name: fc.name, response: { ok: true } };
+            }
+            const guard = checkMatchOverlap(opportunityCode, guardCtx);
+            if (!guard.accepted) {
+              rejectedToolCalls.push({ name: fc.name, args, reason: guard.reason });
+              return {
+                id: fc.id,
+                name: fc.name,
+                response: { ok: false, error: guard.reason },
+              };
+            }
+            toolCalls.push({ id: fc.id, name: fc.name, args });
+            return {
+              id: fc.id,
+              name: fc.name,
+              response: { ok: true, note: 'Rep notified — waiting for their confirm.' },
+            };
+          }
+          toolCalls.push({ id: fc.id, name: fc.name, args });
+          return { id: fc.id, name: fc.name, response: { ok: true } };
         });
         ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
       }
@@ -541,7 +647,7 @@ async function sendTurnAndAwaitComplete(
       if (sc?.turnComplete) {
         clearTimeout(timer);
         ws.removeEventListener('message', handler);
-        resolve({ text: textParts.join(''), toolCalls, turnComplete: true });
+        resolve({ text: textParts.join(''), toolCalls, rejectedToolCalls, turnComplete: true });
       }
     };
 
@@ -565,10 +671,18 @@ async function sendTurnAndAwaitComplete(
 async function runScenario(
   scenario: Scenario,
   session: AuthedSession,
+  recentLeadsForGuard: Map<string, RecentLeadForGuard>,
 ): Promise<SimResult> {
   const transcript: SimResult['transcript'] = [];
   const liveFields: SimResult['liveFields'] = {};
   const matches: SimResult['matches'] = [];
+  const rejectedMatches: Array<{ opportunityCode: string; reason: string }> = [];
+
+  const guardCtx: MatchGuardContext = {
+    recentLeads: recentLeadsForGuard,
+    repTranscript: '',
+    liveFields,
+  };
 
   const token = await mintToken(session);
   const ws = await openLiveSocket(token);
@@ -580,7 +694,8 @@ async function runScenario(
     // 2. Drive the rep's turns one at a time, applying tool effects.
     for (const repText of scenario.repTurns) {
       transcript.push({ role: 'rep', text: repText });
-      const outcome = await sendTurnAndAwaitComplete(ws, repText);
+      guardCtx.repTranscript += ' ' + repText;
+      const outcome = await sendTurnAndAwaitComplete(ws, repText, guardCtx);
       transcript.push({
         role: 'ai',
         text: outcome.text || undefined,
@@ -601,7 +716,16 @@ async function runScenario(
           }
         }
       }
-      if (!outcome.turnComplete) break; // Avoid sending the next turn into a stuck WSS
+      for (const rtc of outcome.rejectedToolCalls) {
+        const code = String(rtc.args.opportunityCode ?? '');
+        if (code) rejectedMatches.push({ opportunityCode: code, reason: rtc.reason });
+      }
+      // Tolerate Gemini Live preview's occasional dropped turnComplete. If the
+      // AI emitted text OR tool calls, treat the turn as logically complete
+      // and proceed to the next rep turn — matches how the prod client
+      // (which doesn't gate on turnComplete either) behaves.
+      const turnHadOutput = outcome.text.length > 0 || outcome.toolCalls.length > 0;
+      if (!outcome.turnComplete && !turnHadOutput) break; // Hard-stuck WSS
     }
   } finally {
     try {
@@ -617,6 +741,7 @@ async function runScenario(
     transcript,
     liveFields,
     matches,
+    rejectedMatches: rejectedMatches.length > 0 ? rejectedMatches : undefined,
     passed: notes.length === 0,
     notes,
   };
@@ -727,6 +852,43 @@ async function resetTestData(): Promise<void> {
   console.log(`• reset: deleted ${result.length} non-TST opportunities (${result.map((r) => r.code).join(', ')})`);
 }
 
+/**
+ * Load the show's recent leads as a Map keyed by opportunityCode, with the
+ * full mergedFields so the test harness can apply the same overlap guard
+ * the production hook applies.
+ */
+async function loadRecentLeadsForGuard(): Promise<Map<string, RecentLeadForGuard>> {
+  const { db } = await import('@/db/client');
+  const schema = await import('@/db/schema');
+  const { desc, eq } = await import('drizzle-orm');
+  const [demo] = await db.select().from(schema.shows).where(eq(schema.shows.slug, SHOW_SLUG)).limit(1);
+  if (!demo) {
+    console.error(`Show ${SHOW_SLUG} not found`);
+    process.exit(1);
+  }
+  const rows = await db
+    .select({
+      opportunityCode: schema.opportunities.code,
+      mergedFields: schema.leads.mergedFields,
+    })
+    .from(schema.leads)
+    .innerJoin(schema.opportunities, eq(schema.opportunities.id, schema.leads.opportunityId))
+    .where(eq(schema.opportunities.showId, demo.id))
+    .orderBy(desc(schema.leads.lastUpdatedAt))
+    .limit(100);
+  const map = new Map<string, RecentLeadForGuard>();
+  for (const r of rows) {
+    const fields = (r.mergedFields ?? {}) as Record<string, unknown>;
+    const knownFields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(fields)) {
+      if (v == null || v === '') continue;
+      knownFields[k] = typeof v === 'string' ? v : JSON.stringify(v);
+    }
+    map.set(r.opportunityCode, { opportunityCode: r.opportunityCode, knownFields });
+  }
+  return map;
+}
+
 interface AggregateRow {
   scenarioName: string;
   results: SimResult[];
@@ -756,7 +918,11 @@ async function main() {
 
   process.stdout.write('• authenticating … ');
   const session = await loginAsTestRep({ email: REP_EMAIL });
-  console.log('OK\n');
+  console.log('OK');
+
+  process.stdout.write('• loading recent leads for overlap guard … ');
+  const recentLeadsForGuard = await loadRecentLeadsForGuard();
+  console.log(`${recentLeadsForGuard.size} leads\n`);
 
   const outDir = join(process.cwd(), 'tests', 'scenario-runs');
   mkdirSync(outDir, { recursive: true });
@@ -775,7 +941,7 @@ async function main() {
       const row = aggregate.find((a) => a.scenarioName === scenario.name)!;
       process.stdout.write(`▶ ${scenario.name} … `);
       try {
-        const r = await runScenario(scenario, session);
+        const r = await runScenario(scenario, session, recentLeadsForGuard);
         row.results.push(r);
         row.total++;
         if (r.passed) row.passes++;

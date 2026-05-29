@@ -32,6 +32,9 @@ interface Props {
   show: Show;
   shows: ShowSummary[];
   leadsUrl: string;
+  /** True when the signed-in rep has the admin role — gates the admin
+   *  shortcut in the show-switcher sheet. */
+  isAdmin: boolean;
 }
 
 function pickAudioMime(): string | undefined {
@@ -48,7 +51,7 @@ function pickAudioMime(): string | undefined {
   return undefined;
 }
 
-export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
+export function CaptureRecorder({ showSlug, show, shows, leadsUrl, isAdmin }: Props) {
   const searchParams = useSearchParams();
   const devMode = searchParams.get('dev') === '1';
 
@@ -530,6 +533,7 @@ export function CaptureRecorder({ showSlug, show, shows, leadsUrl }: Props) {
         onClose={() => setActiveSheet(null)}
         currentSlug={show.slug}
         shows={shows}
+        isAdmin={isAdmin}
       />
       <LeadPickerSheet
         open={activeSheet === 'pick'}

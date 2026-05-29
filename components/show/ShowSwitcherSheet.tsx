@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Check, ChevronRight, QrCode } from 'lucide-react';
+import { Check, ChevronRight, QrCode, Settings } from 'lucide-react';
 import { Sheet } from '@/components/ui/Sheet';
 import { LivePill } from '@/components/ui/LivePill';
 import { ShowSwatch } from '@/components/ui/ShowSwatch';
@@ -32,9 +32,17 @@ interface ShowSwitcherSheetProps {
   onClose: () => void;
   currentSlug: string;
   shows: ShowSummary[];
+  /** Show the admin shortcut row — only true for admin reps. */
+  isAdmin?: boolean;
 }
 
-export function ShowSwitcherSheet({ open, onClose, currentSlug, shows }: ShowSwitcherSheetProps) {
+export function ShowSwitcherSheet({
+  open,
+  onClose,
+  currentSlug,
+  shows,
+  isAdmin = false,
+}: ShowSwitcherSheetProps) {
   const router = useRouter();
   const [joinOpen, setJoinOpen] = useState(false);
 
@@ -106,6 +114,22 @@ export function ShowSwitcherSheet({ open, onClose, currentSlug, shows }: ShowSwi
         </div>
         <ChevronRight size={16} className="text-ink-4" />
       </button>
+
+      {isAdmin ? (
+        <a
+          href="/admin/shows"
+          className="card-flat mt-3 flex items-center gap-2.5 text-left border-0 w-full no-underline"
+        >
+          <div className="w-9 h-9 rounded-[10px] bg-surface text-ink-2 border border-rule-2 flex items-center justify-center">
+            <Settings size={18} />
+          </div>
+          <div className="flex-1">
+            <div className="font-semibold text-sm">Admin</div>
+            <div className="t-tiny mt-1">Shows, captures, providers, and team management.</div>
+          </div>
+          <ChevronRight size={16} className="text-ink-4" />
+        </a>
+      ) : null}
     </Sheet>
     <JoinShowSheet open={joinOpen} onClose={() => setJoinOpen(false)} />
     </>

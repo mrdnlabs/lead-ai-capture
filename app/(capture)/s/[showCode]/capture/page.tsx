@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { requireRep } from '@/lib/auth/currentRep';
+import { isAdmin, requireRep } from '@/lib/auth/currentRep';
 import { getShowMembership, listShowsForRep } from '@/lib/showAccess';
 import { CaptureRecorder } from './CaptureRecorder';
 
@@ -59,6 +59,7 @@ export default async function CapturePage({ params }: Params) {
         isToday: isTodayWindow(s.startsAt, s.endsAt),
       }))}
       leadsUrl={`/s/${showCode}/leads`}
+      isAdmin={isAdmin(rep)}
     />
   );
 }

@@ -42,6 +42,12 @@ export default async function ShowsAdminPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               <a
+                href={`/admin/shows/${show.id}/captures`}
+                className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
+              >
+                Captures
+              </a>
+              <a
                 href={`/admin/shows/${show.id}/team`}
                 className="rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
               >

@@ -126,7 +126,16 @@ export default async function AnalyticsPage() {
             return (
               <div key={capId} className="px-4 py-3 text-sm">
                 <div className="flex items-baseline justify-between">
-                  <div className="font-mono text-xs text-neutral-500">{capId.slice(0, 8)}</div>
+                  {cap.showId ? (
+                    <a
+                      href={`/admin/shows/${cap.showId}/captures/${capId}`}
+                      className="font-mono text-xs text-neutral-700 underline-offset-2 hover:underline"
+                    >
+                      {capId.slice(0, 8)} · review →
+                    </a>
+                  ) : (
+                    <div className="font-mono text-xs text-neutral-500">{capId.slice(0, 8)}</div>
+                  )}
                   <div className="text-xs text-neutral-500">
                     {first.show?.name} · {first.rep?.email} ·{' '}
                     {new Date(cap.serverReceivedAt).toLocaleString()}
